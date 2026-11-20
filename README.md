@@ -19,6 +19,20 @@ A multi-modal motion tracking, real-time 2D puppet animation, and OSC (Open Soun
 
 ---
 
+## Interface & Screenshots
+
+| **Split: Camera + Puppet** | **2D Puppet Studio (Rigging Canvas)** |
+|:---:|:---:|
+| ![Split Mode](Screenshots/01%20Split%20mode.png) | ![Puppet Studio Mode](Screenshots/02%20PuppetStudio%20mode.png) |
+| *Real-time tracking telemetry side-by-side with live character performance* | *Interactive canvas pin rigging, layer reordering & Free Transform controls* |
+
+| **Full Stage Preview** | **Camera Telemetry & OSC Broadcast** |
+|:---:|:---:|
+| ![Full Stage Preview](Screenshots/03%20FullStage%20preview.png) | ![Camera and OSC](Screenshots/04%20Camera%20and%20OSC.png) |
+| *Immersive performance stage with collapsible camera picture-in-picture* | *Apple Vision Neural Engine landmarks, speech meters & UDP OSC streaming* |
+
+---
+
 ## Quick Start (Native macOS App)
 
 ### Prerequisites
