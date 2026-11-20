@@ -1,0 +1,524 @@
+{
+  "armLengthScale" : 1.0730261704946995,
+  "armThicknessScale" : 0.7619677561837457,
+  "autoBlinkEnabled" : true,
+  "blinkThreshold" : 0.42,
+  "bodyTurnAmount" : 0.85,
+  "browWarpAmount" : 1,
+  "characterScale" : 0.34,
+  "customImagePaths" : {
+    "browsOverlay" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/browsOverlay.png",
+    "eyesClosed" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/eyesClosed.png",
+    "eyesOpen" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/eyesOpen.png",
+    "head" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/head.png",
+    "leftThigh" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/leftThigh.png",
+    "leftUpperArm" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/leftUpperArm.png",
+    "mouthAh" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/mouthAh.png",
+    "mouthNeutral" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/mouthNeutral.png",
+    "mouthOh" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/mouthOh.png",
+    "mouthSmile" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/mouthSmile.png",
+    "noseOverlay" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/noseOverlay.png",
+    "pelvis" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/pelvis.png",
+    "rightThigh" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/rightThigh.png",
+    "rightUpperArm" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/rightUpperArm.png",
+    "torso" : "\/Users\/tknuutil\/Library\/Application Support\/HandOSCNative\/CustomAssets\/aurora_fox\/torso.png"
+  },
+  "eyeAnimationMode" : "sprite",
+  "eyeSpriteScale" : 1,
+  "handScale" : 0.11140072879858659,
+  "headMoveAmount" : 1,
+  "headScaleAmount" : 0.45,
+  "headTiltAmount" : 1,
+  "headTurnParallax" : 1,
+  "jawWarpAmount" : 1,
+  "legLengthScale" : 0.7324950309187279,
+  "legThicknessScale" : 0.5922440923144876,
+  "mouthAnimationMode" : "sprites",
+  "mouthSpriteScale" : 1,
+  "noseSpriteScale" : 1,
+  "partEnabled" : {
+    "browsOverlay" : true,
+    "eyesClosed" : true,
+    "eyesOpen" : true,
+    "head" : true,
+    "leftFoot" : false,
+    "leftForearm" : false,
+    "leftHand" : false,
+    "leftShin" : false,
+    "leftThigh" : true,
+    "leftUpperArm" : true,
+    "mouthAh" : true,
+    "mouthNeutral" : true,
+    "mouthOh" : true,
+    "mouthSmile" : true,
+    "noseOverlay" : true,
+    "pelvis" : true,
+    "rightFoot" : false,
+    "rightForearm" : false,
+    "rightHand" : false,
+    "rightShin" : false,
+    "rightThigh" : true,
+    "rightUpperArm" : true,
+    "tail" : false,
+    "torso" : true
+  },
+  "partFileNames" : {
+    "browsOverlay" : "Sheet Part #6",
+    "eyesClosed" : "Sheet Part #3",
+    "eyesOpen" : "Sheet Part #5",
+    "head" : "Sheet Part #1",
+    "leftThigh" : "Sheet Part #17",
+    "leftUpperArm" : "Sheet Part #14",
+    "mouthAh" : "Sheet Part #9",
+    "mouthNeutral" : "Sheet Part #12",
+    "mouthOh" : "Sheet Part #10",
+    "mouthSmile" : "Sheet Part #11",
+    "noseOverlay" : "Sheet Part #8",
+    "pelvis" : "Sheet Part #16",
+    "rightThigh" : "Sheet Part #17",
+    "rightUpperArm" : "Sheet Part #15",
+    "torso" : "Sheet Part #13"
+  },
+  "partFlipH" : {
+    "leftFoot" : true,
+    "leftForearm" : false,
+    "rightHand" : true,
+    "rightThigh" : false,
+    "torso" : true
+  },
+  "partFlipV" : {
+    "leftForearm" : true,
+    "rightHand" : false,
+    "rightThigh" : true,
+    "torso" : false
+  },
+  "partLayerOrder" : {
+    "leftFoot" : 0,
+    "leftForearm" : 0,
+    "leftHand" : 0,
+    "leftShin" : 0,
+    "leftThigh" : 0,
+    "leftUpperArm" : 0,
+    "rightFoot" : 1,
+    "rightForearm" : 0,
+    "rightHand" : 0,
+    "rightShin" : 1,
+    "rightThigh" : 1,
+    "rightUpperArm" : 0,
+    "tail" : 0
+  },
+  "partRotationOffset" : {
+    "head" : -7.361111111111114,
+    "leftFoot" : -1.866319444444457,
+    "rightFoot" : 0,
+    "rightHand" : 0.034722222222200116,
+    "torso" : -32.99479166666663
+  },
+  "partWidthScale" : {
+    "head" : 0.5388213734567902,
+    "leftFoot" : 1.1115258487654323,
+    "leftShin" : 0.8217592592592591,
+    "leftThigh" : 1.2901716820987654,
+    "leftUpperArm" : 1.4170090663580246,
+    "rightFoot" : 1,
+    "rightThigh" : 1.6228877314814814,
+    "rightUpperArm" : 1.5462866512345679,
+    "torso" : 0.9389419367283949
+  },
+  "pinsBySlot" : {
+    "browsOverlay" : [
+      {
+        "id" : "browsAnchor",
+        "name" : "Brows Center",
+        "trackedSourceLabel" : "Attaches to Head Brows Midpoint",
+        "x" : 0.532713779956427,
+        "y" : 0.02
+      }
+    ],
+    "eyesClosed" : [
+      {
+        "id" : "eyeCenter",
+        "name" : "Eye Center",
+        "trackedSourceLabel" : "Aligns with Head Left\/Right Eye Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "eyesOpen" : [
+      {
+        "id" : "eyeCenter",
+        "name" : "Eye Center",
+        "trackedSourceLabel" : "Aligns with Head Left\/Right Eye Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "head" : [
+      {
+        "id" : "neckPivot",
+        "name" : "Head Base \/ Neck Joint",
+        "trackedSourceLabel" : "Attaches to Torso Neck Mount",
+        "x" : 0.51,
+        "y" : 0.89
+      },
+      {
+        "id" : "leftBrow",
+        "name" : "Left Ear \/ Brow",
+        "trackedSourceLabel" : "Left Brow \/ Ear Lift Warp",
+        "x" : 0.597466108027327,
+        "y" : 0.43105075670430937
+      },
+      {
+        "id" : "rightBrow",
+        "name" : "Right Ear \/ Brow",
+        "trackedSourceLabel" : "Right Brow \/ Ear Lift Warp",
+        "x" : 0.7096165136635354,
+        "y" : 0.4477721142897808
+      },
+      {
+        "id" : "leftEye",
+        "name" : "Left Eye",
+        "trackedSourceLabel" : "Left Eye Sprite & Wink Anchor",
+        "x" : 0.3919593296327925,
+        "y" : 0.5131240613223379
+      },
+      {
+        "id" : "rightEye",
+        "name" : "Right Eye",
+        "trackedSourceLabel" : "Right Eye Sprite & Wink Anchor",
+        "x" : 0.6448681682322801,
+        "y" : 0.5070412441953341
+      },
+      {
+        "id" : "noseCenter",
+        "name" : "Nose Tip",
+        "trackedSourceLabel" : "Nose Layer & 2.5D Turn Center",
+        "x" : 0.5173796434671221,
+        "y" : 0.590865275591513
+      },
+      {
+        "id" : "mouthCenter",
+        "name" : "Mouth Pin",
+        "trackedSourceLabel" : "Mouth Viseme Sprite & Jaw Line",
+        "x" : 0.5184337638770282,
+        "y" : 0.7136270040170625
+      },
+      {
+        "id" : "jawChin",
+        "name" : "Lower Jaw \/ Chin",
+        "trackedSourceLabel" : "Stretches Down When Mouth Opens",
+        "x" : 0.5215906119246861,
+        "y" : 0.8228815312820101
+      }
+    ],
+    "leftFoot" : [
+      {
+        "id" : "ankleJoint",
+        "name" : "Ankle Joint",
+        "trackedSourceLabel" : "Attaches to Lower Leg Ankle",
+        "x" : 0.26760647950469685,
+        "y" : 0.2896481590918685
+      },
+      {
+        "id" : "toeTip",
+        "name" : "Toe Tip",
+        "trackedSourceLabel" : "Toe Tip \/ Foot Front",
+        "x" : 0.2335410439795047,
+        "y" : 0.8508802415309135
+      }
+    ],
+    "leftForearm" : [
+      {
+        "id" : "elbowJoint",
+        "name" : "Elbow Joint",
+        "trackedSourceLabel" : "Attaches to Upper Arm Elbow",
+        "x" : 0.4791544907436659,
+        "y" : 0.13781927244582043
+      },
+      {
+        "id" : "wristJoint",
+        "name" : "Wrist Joint",
+        "trackedSourceLabel" : "Connects to Left Paw",
+        "x" : 0.4760530857079674,
+        "y" : 0.7986830011609907
+      }
+    ],
+    "leftHand" : [
+      {
+        "id" : "wristPivot",
+        "name" : "Wrist Pivot",
+        "trackedSourceLabel" : "Left Hand Wrist (Landmark 0)",
+        "x" : 0.4710618844076413,
+        "y" : 0.23220685206422018
+      },
+      {
+        "id" : "middleKnuckle",
+        "name" : "Paw \/ Finger Direction",
+        "trackedSourceLabel" : "Left Middle MCP (Landmark 9)",
+        "x" : 0.10547875747224594,
+        "y" : 0.7502442983514647
+      }
+    ],
+    "leftShin" : [
+      {
+        "id" : "kneeJoint",
+        "name" : "Knee Joint",
+        "trackedSourceLabel" : "Attaches to Thigh Knee",
+        "x" : 0.29399142888395785,
+        "y" : 0.08402325803981624
+      },
+      {
+        "id" : "ankleJoint",
+        "name" : "Ankle \/ Foot",
+        "trackedSourceLabel" : "Pose Ankle (27 \/ 28)",
+        "x" : 0.39020064381035724,
+        "y" : 0.8504438648545176
+      }
+    ],
+    "leftThigh" : [
+      {
+        "id" : "hipJoint",
+        "name" : "Hip Joint",
+        "trackedSourceLabel" : "Attaches to Left Hip",
+        "x" : 0.6675944673913825,
+        "y" : 0.08388567189892802
+      },
+      {
+        "id" : "kneeJoint",
+        "name" : "Paw \/ Foot Tip",
+        "trackedSourceLabel" : "Left Foot Ground Anchor",
+        "x" : 0.638091662532623,
+        "y" : 0.7502093702143952
+      }
+    ],
+    "leftUpperArm" : [
+      {
+        "id" : "shoulderJoint",
+        "name" : "Shoulder Joint",
+        "trackedSourceLabel" : "Attaches to Torso Left Shoulder",
+        "x" : 0.5023007311477222,
+        "y" : 0.0979827786377709
+      },
+      {
+        "id" : "elbowJoint",
+        "name" : "Elbow Joint",
+        "trackedSourceLabel" : "Connects to Left Forearm",
+        "x" : 0.43604444244803187,
+        "y" : 0.8233056791795665
+      }
+    ],
+    "mouthAh" : [
+      {
+        "id" : "mouthAnchor",
+        "name" : "Mouth Center",
+        "trackedSourceLabel" : "Aligns with Head Mouth Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "mouthNeutral" : [
+      {
+        "id" : "mouthAnchor",
+        "name" : "Mouth Center",
+        "trackedSourceLabel" : "Aligns with Head Mouth Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "mouthOh" : [
+      {
+        "id" : "mouthAnchor",
+        "name" : "Mouth Center",
+        "trackedSourceLabel" : "Aligns with Head Mouth Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "mouthSmile" : [
+      {
+        "id" : "mouthAnchor",
+        "name" : "Mouth Center",
+        "trackedSourceLabel" : "Aligns with Head Mouth Pin",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "noseOverlay" : [
+      {
+        "id" : "noseAnchor",
+        "name" : "Nose Center",
+        "trackedSourceLabel" : "Aligns with Head Nose Pin (2.5D Parallax)",
+        "x" : 0.5,
+        "y" : 0.5
+      }
+    ],
+    "pelvis" : [
+      {
+        "id" : "waistJoint",
+        "name" : "Waist Joint",
+        "trackedSourceLabel" : "Supports Torso Waist Pivot",
+        "x" : 0.3342502364651833,
+        "y" : 0.05810322549770291
+      },
+      {
+        "id" : "leftHip",
+        "name" : "Left Hip",
+        "trackedSourceLabel" : "Pose Left Hip (23) \/ L Leg Mount",
+        "x" : 0.02,
+        "y" : 0.33064342457886675
+      },
+      {
+        "id" : "rightHip",
+        "name" : "Right Hip",
+        "trackedSourceLabel" : "Pose Right Hip (24) \/ R Leg Mount",
+        "x" : 0.8171025132870913,
+        "y" : 0.3718115907350689
+      }
+    ],
+    "rightFoot" : [
+      {
+        "id" : "ankleJoint",
+        "name" : "Ankle Joint",
+        "trackedSourceLabel" : "Attaches to Lower Leg Ankle",
+        "x" : 0.3081300704526046,
+        "y" : 0.23770009363645514
+      },
+      {
+        "id" : "toeTip",
+        "name" : "Toe Tip",
+        "trackedSourceLabel" : "Toe Tip \/ Foot Front",
+        "x" : 0.34134820666097354,
+        "y" : 0.8049017283982687
+      }
+    ],
+    "rightForearm" : [
+      {
+        "id" : "elbowJoint",
+        "name" : "Elbow Joint",
+        "trackedSourceLabel" : "Attaches to Upper Arm Elbow",
+        "x" : 0.487139216906535,
+        "y" : 0.191031346749226
+      },
+      {
+        "id" : "wristJoint",
+        "name" : "Wrist Joint",
+        "trackedSourceLabel" : "Connects to Right Paw",
+        "x" : 0.5139555855681532,
+        "y" : 0.8655911377708978
+      }
+    ],
+    "rightHand" : [
+      {
+        "id" : "wristPivot",
+        "name" : "Wrist Pivot",
+        "trackedSourceLabel" : "Right Hand Wrist (Landmark 0)",
+        "x" : 0.3432464124940177,
+        "y" : 0.12126232328869048
+      },
+      {
+        "id" : "middleKnuckle",
+        "name" : "Paw \/ Finger Direction",
+        "trackedSourceLabel" : "Right Middle MCP (Landmark 9)",
+        "x" : 0.4978102261942423,
+        "y" : 0.5395522744648318
+      }
+    ],
+    "rightShin" : [
+      {
+        "id" : "kneeJoint",
+        "name" : "Knee Joint",
+        "trackedSourceLabel" : "Attaches to Thigh Knee",
+        "x" : 0.5590441096040254,
+        "y" : 0.11962217649310873
+      },
+      {
+        "id" : "ankleJoint",
+        "name" : "Ankle \/ Foot",
+        "trackedSourceLabel" : "Pose Ankle (27 \/ 28)",
+        "x" : 0.4155164937337875,
+        "y" : 0.8360571401225115
+      }
+    ],
+    "rightThigh" : [
+      {
+        "id" : "hipJoint",
+        "name" : "Hip Joint",
+        "trackedSourceLabel" : "Attaches to Right Hip",
+        "x" : 0.607337691603937,
+        "y" : 0.08223463820826953
+      },
+      {
+        "id" : "kneeJoint",
+        "name" : "Paw \/ Foot Tip",
+        "trackedSourceLabel" : "Right Foot Ground Anchor",
+        "x" : 0.5767690786115365,
+        "y" : 0.7913655723583461
+      }
+    ],
+    "rightUpperArm" : [
+      {
+        "id" : "shoulderJoint",
+        "name" : "Shoulder Joint",
+        "trackedSourceLabel" : "Attaches to Torso Right Shoulder",
+        "x" : 0.45790652697869694,
+        "y" : 0.07728282683486239
+      },
+      {
+        "id" : "elbowJoint",
+        "name" : "Elbow Joint",
+        "trackedSourceLabel" : "Connects to Right Forearm",
+        "x" : 0.5163004890517328,
+        "y" : 0.8388339299535603
+      }
+    ],
+    "tail" : [
+      {
+        "id" : "tailBase",
+        "name" : "Tail Base Pivot",
+        "trackedSourceLabel" : "Attaches behind Torso Waist",
+        "x" : 0.537786595983797,
+        "y" : 0.9156297856049005
+      },
+      {
+        "id" : "tailTip",
+        "name" : "Tail Tip",
+        "trackedSourceLabel" : "Sways with Body & 2.5D Turn",
+        "x" : 0.48104276529746914,
+        "y" : 0.055572836906584995
+      }
+    ],
+    "torso" : [
+      {
+        "id" : "neckMount",
+        "name" : "Neck Top (Head Mount)",
+        "trackedSourceLabel" : "Stationary Neck Top Where Head Attaches",
+        "x" : 0.4971111763450043,
+        "y" : 0.1219082816285921
+      },
+      {
+        "id" : "leftShoulder",
+        "name" : "Left Shoulder",
+        "trackedSourceLabel" : "Left Arm Mount",
+        "x" : 0.06811752775405636,
+        "y" : 0.31085917357368464
+      },
+      {
+        "id" : "rightShoulder",
+        "name" : "Right Shoulder",
+        "trackedSourceLabel" : "Right Arm Mount",
+        "x" : 0.9361523270708796,
+        "y" : 0.3401701340509686
+      },
+      {
+        "id" : "waistPivot",
+        "name" : "Hips \/ Tail Mount",
+        "trackedSourceLabel" : "Lower Body & Tail Anchor",
+        "x" : 0.44894854824935954,
+        "y" : 0.8331179465675679
+      }
+    ]
+  },
+  "preset" : "aurora_fox",
+  "showFullBodyLegs" : true,
+  "stageBackground" : "dark"
+}
