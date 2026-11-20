@@ -104,16 +104,43 @@ The build script compiles with optimizations (`swift build -c release`), copies 
 
 ---
 
-## Publishing with GitHub Desktop
+## Architecture & Data Flow
 
-To publish this project to GitHub using **GitHub Desktop**:
+```
+Camera Input (AVFoundation 60 FPS)
+  │
+  ├──► Apple Vision Neural Engine
+  │     ├── Face Landmarks & IOD Metrics (2.5D Head Pose, Winks, Visemes)
+  │     ├── Hand Landmarks (21 Joints, Wrist Angle, 3D Palm Orientation)
+  │     └── Body Pose (33 Joints, Outward 2-Bone IK Target Evaluation)
+  │
+  ├──► 2D Puppet Studio (SwiftUI Canvas & Metal Compositor)
+  │     ├── Hierarchical Articulation & Forward/Inverse Kinematics
+  │     ├── Multi-Layer Depth Ordering (Front/Behind Body & Head)
+  │     ├── Speech Viseme Lip-Sync & Sympathetic Wink Isolation
+  │     └── Free Transform Canvas Tool (CMD+T / Multi-Handle Scaling & Rotation)
+  │
+  └──► OSC Broadcaster (UDP Socket / Sub-Millisecond Dispatch)
+        └── OBS Studio, TouchDesigner, Resolume, Max/MSP, Vuo
+```
 
-1. **Open GitHub Desktop**.
-2. Go to **File → Add Local Repository...** (or press `⌘O`).
-3. Select this folder: `/Users/tknuutil/HandBodyFaceOSCsource` (or your local clone path).
-4. GitHub Desktop will read the pre-configured [`.gitignore`](.gitignore), ensuring all compiled binaries (`macos-native/build/`, `macos-native/.build/`), dependencies (`node_modules/`), and OS metadata (`.DS_Store`) are automatically excluded.
-5. Enter a summary (e.g. `Initial commit: HandOSC & 2D Puppet Studio`) and click **Commit to main**.
-6. Click **Publish repository** to push it to your GitHub account (public or private).
+---
+
+## Contributing & Development
+
+Contributions are welcome! To get started:
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/<your-username>/HandBodyFaceOSC.git
+   cd HandBodyFaceOSC
+   ```
+2. Build and launch the native macOS application:
+   ```bash
+   ./macos-native/build-app.sh
+   open "macos-native/build/HandOSC Native.app"
+   ```
+3. Make sure all local builds pass before opening a Pull Request. Build artifacts (`.build/`, `build/`) and OS caches are automatically ignored by [`.gitignore`](.gitignore).
 
 ---
 

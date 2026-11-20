@@ -242,12 +242,44 @@ public struct TrackedHand: Sendable {
     public let pinch: Float
     /// Wrist angle in radians (wrist -> middle MCP)
     public let wristAngle: Float
+    /// Independent thumb orientation in screen space (wrist/CMC -> thumb tip, radians)
+    public let thumbAngle: Float
+    /// Angle difference between thumb vector and middle-finger vector (radians)
+    public let thumbSpread: Float
     /// Relative depth scale based on apparent hand size in camera (1.0 = normal distance, >1 = closer)
     public let scale: Float
     /// Palm orientation sign (+1 = palm facing camera, -1 = back of hand facing camera)
     public let palmFacingSign: Float
     /// Per-finger curl ratios [Thumb, Index, Middle, Ring, Pinky] (0.0 = extended, 1.0 = curled into fist)
     public let fingerCurls: [Float]
+
+    public init(
+        label: String,
+        rawLandmarks: [Landmark],
+        smoothedLandmarks: [Landmark],
+        gesture: String,
+        gestureScore: Float,
+        pinch: Float,
+        wristAngle: Float,
+        thumbAngle: Float = 0,
+        thumbSpread: Float = 0,
+        scale: Float,
+        palmFacingSign: Float,
+        fingerCurls: [Float]
+    ) {
+        self.label = label
+        self.rawLandmarks = rawLandmarks
+        self.smoothedLandmarks = smoothedLandmarks
+        self.gesture = gesture
+        self.gestureScore = gestureScore
+        self.pinch = pinch
+        self.wristAngle = wristAngle
+        self.thumbAngle = thumbAngle
+        self.thumbSpread = thumbSpread
+        self.scale = scale
+        self.palmFacingSign = palmFacingSign
+        self.fingerCurls = fingerCurls
+    }
 }
 
 public struct TrackedFrame: Sendable {

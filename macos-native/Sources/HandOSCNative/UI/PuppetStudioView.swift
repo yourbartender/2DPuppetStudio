@@ -1015,6 +1015,22 @@ public struct PuppetStageView: View {
         return (localXf, CGSize(width: effW, height: effH), boxXf, pivotInBox)
     }
 
+    private func counterpartLimbSlot(for slot: PuppetPartSlot) -> PuppetPartSlot? {
+        switch slot {
+        case .leftUpperArm: return .rightUpperArm
+        case .rightUpperArm: return .leftUpperArm
+        case .leftForearm: return .rightForearm
+        case .rightForearm: return .leftForearm
+        case .leftThigh: return .rightThigh
+        case .rightThigh: return .leftThigh
+        case .leftShin: return .rightShin
+        case .rightShin: return .leftShin
+        case .leftFoot: return .rightFoot
+        case .rightFoot: return .leftFoot
+        default: return nil
+        }
+    }
+
     private func buildLimbSegmentPart(
         slot: PuppetPartSlot,
         startPinId: String,
@@ -1026,9 +1042,18 @@ public struct PuppetStageView: View {
         flipAcrossBone: Bool = false,
         localRotationRad: CGFloat = 0.0
     ) -> PlacedStagePart? {
-        guard puppet.partEnabled[slot] == true, let img = puppet.partImages[slot] else { return nil }
-        let pStart = puppet.pin(in: slot, id: startPinId)
-        let pEnd = puppet.pin(in: slot, id: endPinId)
+        guard puppet.partEnabled[slot] != false else { return nil }
+        let hasDirect = (puppet.partImages[slot] != nil)
+        let counterpart = counterpartLimbSlot(for: slot)
+        let hasFallback = (counterpart != nil && puppet.partImages[counterpart!] != nil)
+        guard hasDirect || hasFallback else { return nil }
+
+        let activeSlot = hasDirect ? slot : counterpart!
+        guard let img = puppet.partImages[activeSlot] else { return nil }
+        let needsMirror = !hasDirect && hasFallback
+
+        let pStart = puppet.pin(in: activeSlot, id: startPinId)
+        let pEnd = puppet.pin(in: activeSlot, id: endPinId)
 
         let segDx: CGFloat = endPt.x - startPt.x
         let segDy: CGFloat = endPt.y - startPt.y
@@ -1041,19 +1066,34 @@ public struct PuppetStageView: View {
         let rawPinDy: CGFloat = (pEnd.y - pStart.y)
         let normPinDist: CGFloat = max(0.1, hypot(rawPinDx, rawPinDy))
 
+        let symmetricNormPinDist: CGFloat = {
+            if let cp = counterpart, let cpImg = puppet.partImages[cp], cpImg.size == img.size {
+                let cpStart = puppet.pin(in: cp, id: startPinId)
+                let cpEnd = puppet.pin(in: cp, id: endPinId)
+                let cpDx = (cpEnd.x - cpStart.x) * imgAspect
+                let cpDy = (cpEnd.y - cpStart.y)
+                let cpDist = max(0.1, hypot(cpDx, cpDy))
+                return (normPinDist + cpDist) * 0.5
+            }
+            return normPinDist
+        }()
+
         let refLen: CGFloat = max(4.0, naturalLength)
-        let imgH: CGFloat = refLen / normPinDist
+        let imgH: CGFloat = refLen / symmetricNormPinDist
         let imgW: CGFloat = imgH * imgAspect
 
         let actualPinDx: CGFloat = (pEnd.x - pStart.x) * imgW
         let actualPinDy: CGFloat = (pEnd.y - pStart.y) * imgH
         let pinAngle: CGFloat = atan2(actualPinDy, actualPinDx)
 
-        let partWidthMult: CGFloat = puppet.partWidth(for: slot)
-        let flipH: CGFloat = puppet.isPartFlippedH(slot) ? -1.0 : 1.0
-        let flipV: CGFloat = puppet.isPartFlippedV(slot) ? -1.0 : 1.0
-        let alongBoneScale: CGFloat = (targetDist / refLen) * flipH
-        let acrossSign: CGFloat = (flipAcrossBone ? -1.0 : 1.0) * flipV
+        let xf = resolvedMirrorTransform(slot: slot, fallbackSlot: counterpart ?? slot, needsMirror: needsMirror)
+        let partWidthMult: CGFloat = xf.width
+        let flipH: CGFloat = xf.flipH ? -1.0 : 1.0
+        let flipV: CGFloat = xf.flipV ? -1.0 : 1.0
+
+        let alongBoneScale: CGFloat = (targetDist / refLen) * flipV
+        let defaultAcrossSign: CGFloat = (needsMirror || flipAcrossBone) ? -1.0 : 1.0
+        let acrossSign: CGFloat = defaultAcrossSign * flipH
         let acrossBoneScale: CGFloat = acrossSign * thicknessScale * partWidthMult
 
         var localXf = CGAffineTransform.identity
@@ -1242,14 +1282,15 @@ public struct PuppetStageView: View {
                 puppet.isPartFlippedV(slot)
             )
         }
-        let ownRot = puppet.partRotationDegrees(for: slot)
-        return (
-            puppet.partWidth(for: fallbackSlot) * puppet.partWidth(for: slot),
-            puppet.partHeight(for: fallbackSlot) * puppet.partHeight(for: slot),
-            abs(ownRot) < 0.01 ? -puppet.partRotationDegrees(for: fallbackSlot) : ownRot,
-            puppet.isPartFlippedH(fallbackSlot) != puppet.isPartFlippedH(slot),
-            puppet.isPartFlippedV(fallbackSlot) != puppet.isPartFlippedV(slot)
-        )
+        let ownWidth = puppet.partWidthScale[slot]
+        let ownHeight = puppet.partHeightScale[slot]
+        let ownRot = puppet.partRotationOffset[slot]
+        let effWidth = ownWidth != nil ? CGFloat(ownWidth!) : puppet.partWidth(for: fallbackSlot)
+        let effHeight = ownHeight != nil ? CGFloat(ownHeight!) : puppet.partHeight(for: fallbackSlot)
+        let effRot = ownRot != nil ? ownRot! : -puppet.partRotationDegrees(for: fallbackSlot)
+        let effFlipH = (puppet.partFlipH[slot] != nil) ? puppet.isPartFlippedH(slot) : !puppet.isPartFlippedH(fallbackSlot)
+        let effFlipV = (puppet.partFlipV[slot] != nil) ? puppet.isPartFlippedV(slot) : puppet.isPartFlippedV(fallbackSlot)
+        return (effWidth, effHeight, effRot, effFlipH, effFlipV)
     }
 
     private func buildFootPart(
@@ -1285,11 +1326,10 @@ public struct PuppetStageView: View {
         let shinDy: CGFloat = max(1.0, anklePt.y - kneePt.y)
         let shinAngle: CGFloat = atan2(shinDx, shinDy)
         let ankleGroundTilt: CGFloat = shinAngle * 0.18
-        let manualParentRad: CGFloat = CGFloat(parentManualRotDeg * .pi / 180.0)
         let partRotRad: CGFloat = CGFloat(xf.rotDeg * .pi / 180.0)
-        let totalRotRad: CGFloat = ankleGroundTilt + manualParentRad + partRotRad
+        let totalRotRad: CGFloat = ankleGroundTilt + partRotRad
 
-        let defaultSignX: CGFloat = needsMirror ? -1.0 : 1.0
+        let defaultSignX: CGFloat = isRightSide ? -1.0 : 1.0
         let finalFlipX: CGFloat = defaultSignX * (xf.flipH ? -1.0 : 1.0)
         let finalFlipY: CGFloat = xf.flipV ? -1.0 : 1.0
 
@@ -1731,7 +1771,7 @@ public struct PuppetStageView: View {
 
         let refHeadH: CGFloat = size.height * charScale * 0.92 * clampedScale
         let headH: CGFloat = refHeadH * puppet.partHeight(for: .head)
-        let puppetHeadCenterStage = CGPoint(x: baseNeckStage.x, y: baseNeckStage.y - headH * 0.42)
+        _ = headH
 
         let torsoImg = puppet.partImages[.torso]
         let torsoAspect: CGFloat = (torsoImg?.size.width ?? 512.0) / max(1.0, torsoImg?.size.height ?? 440.0)
@@ -1892,7 +1932,7 @@ public struct PuppetStageView: View {
             ]
 
             for side in legSides {
-                let hasShin: Bool = (puppet.partEnabled[side.shinSlot] == true && puppet.partImages[side.shinSlot] != nil)
+                let hasShin: Bool = (puppet.partEnabled[side.shinSlot] != false && (puppet.partImages[side.shinSlot] != nil || puppet.partImages[.leftShin] != nil))
                 let baseLen: CGFloat = baseThighLen
                 let thighLen: CGFloat = baseLen * legLenMult * puppet.partHeight(for: side.thighSlot)
                 let shinLen: CGFloat = baseShinLen * legLenMult * puppet.partHeight(for: side.shinSlot)
@@ -2010,7 +2050,7 @@ public struct PuppetStageView: View {
             let pShoulder = posePt(side.poseShoulderIdx)
             let pElbow = posePt(side.poseElbowIdx)
             let pPoseWrist = posePt(side.poseWristIdx)
-            let hasForearm = (puppet.partEnabled[side.foreSlot] == true && puppet.partImages[side.foreSlot] != nil)
+            let hasForearm = (puppet.partEnabled[side.foreSlot] != false && (puppet.partImages[side.foreSlot] != nil || puppet.partImages[.leftForearm] != nil))
 
             let upperArmLen: CGFloat = baseUpperArmLen * armLenMult * puppet.partHeight(for: side.upperSlot)
             let forearmLen: CGFloat = baseForearmLen * armLenMult * puppet.partHeight(for: side.foreSlot)
@@ -2026,15 +2066,25 @@ public struct PuppetStageView: View {
                     let handScreenX: CGFloat = wristX * 0.72 + palmX * 0.28
                     let handScreenY: CGFloat = wristY * 0.78 + palmY * 0.22
 
-                    let relHeadUnitsX: CGFloat = (handScreenX - realHeadX) / realHeadCameraH
-                    let relHeadUnitsY: CGFloat = (handScreenY - realHeadY) / realHeadCameraH
-                    let xSpanScale: CGFloat = 0.50 * max(0.85, armLenMult * 0.95)
-                    let ySpanScale: CGFloat = 0.65 * max(0.85, armLenMult * 0.95)
+                    // Anatomical ground-truth shoulder-relative reach:
+                    let outSign: CGFloat = side.isLeft ? -1.0 : 1.0
+                    let camShoulderStagePt: CGPoint = {
+                        if let ps = pShoulder { return ps }
+                        let estimatedCamX = (realHeadX + outSign * realHeadCameraH * 0.88)
+                        let estimatedCamY = (realHeadY + realHeadCameraH * 1.05)
+                        return CGPoint(x: estimatedCamX * size.width, y: estimatedCamY * size.height)
+                    }()
+                    let handStagePt = CGPoint(x: handScreenX * size.width, y: handScreenY * size.height)
+                    let dCamX = (handStagePt.x - camShoulderStagePt.x) / max(1.0, realHeadCameraH * size.height)
+                    let dCamY = (handStagePt.y - camShoulderStagePt.y) / max(1.0, realHeadCameraH * size.height)
+
+                    let totalArmSpan: CGFloat = upperArmLen + (hasForearm ? forearmLen : 0.0)
+                    let reachUnit: CGFloat = (totalArmSpan / 2.05) * max(0.85, armLenMult)
                     let rawTargetWrist = CGPoint(
-                        x: puppetHeadCenterStage.x + relHeadUnitsX * refHeadH * xSpanScale,
-                        y: puppetHeadCenterStage.y + relHeadUnitsY * refHeadH * ySpanScale
+                        x: side.shoulderStage.x + dCamX * reachUnit,
+                        y: side.shoulderStage.y + dCamY * reachUnit
                     )
-                    let depthScale: CGFloat = max(0.70, min(1.65, CGFloat(hand.scale)))
+                    let depthScale: CGFloat = max(0.88, min(1.18, CGFloat(hand.scale)))
                     if hasForearm {
                         let elbow = solveTwoBoneIKElbow(
                             shoulder: side.shoulderStage,
@@ -2048,17 +2098,16 @@ public struct PuppetStageView: View {
                         let fDx: CGFloat = rawTargetWrist.x - elbow.x
                         let fDy: CGFloat = rawTargetWrist.y - elbow.y
                         let fDist: CGFloat = max(1.0, hypot(fDx, fDy))
-                        let clampedForeLen: CGFloat = min(fDist, forearmLen * 1.04)
                         let wrist = CGPoint(
-                            x: elbow.x + (fDx / fDist) * clampedForeLen,
-                            y: elbow.y + (fDy / fDist) * clampedForeLen
+                            x: elbow.x + (fDx / fDist) * forearmLen,
+                            y: elbow.y + (fDy / fDist) * forearmLen
                         )
                         return (elbow, wrist, CGFloat(hand.wristAngle), depthScale, CGFloat(hand.palmFacingSign))
                     } else {
                         let sDx: CGFloat = rawTargetWrist.x - side.shoulderStage.x
                         let sDy: CGFloat = rawTargetWrist.y - side.shoulderStage.y
                         let sDist: CGFloat = max(1.0, hypot(sDx, sDy))
-                        let clampedLen: CGFloat = max(onePieceLen * 0.78, min(onePieceLen * 1.06, sDist))
+                        let clampedLen: CGFloat = max(onePieceLen * 0.78, min(onePieceLen * 1.02, sDist))
                         let wrist = CGPoint(
                             x: side.shoulderStage.x + (sDx / sDist) * clampedLen,
                             y: side.shoulderStage.y + (sDy / sDist) * clampedLen
@@ -2216,57 +2265,82 @@ public struct PuppetStageView: View {
                 }
             }
 
-            if puppet.partEnabled[side.handSlot] == true, let handImg = puppet.partImages[side.handSlot] {
-                let wristUV = puppet.pin(in: side.handSlot, id: "wristPivot")
-                let knuckleUV = puppet.pin(in: side.handSlot, id: "middleKnuckle")
-                let handAspect: CGFloat = handImg.size.width / max(1.0, handImg.size.height)
-                let baseHandH: CGFloat = size.height * CGFloat(puppet.handScale) * clampedScale * handDepthScale
-                let baseHandW: CGFloat = baseHandH * handAspect
-                let pinDx: CGFloat = (knuckleUV.x - wristUV.x) * baseHandW
-                let pinDy: CGFloat = (knuckleUV.y - wristUV.y) * baseHandH
-                let intrinsicHandAngle: CGFloat = (hypot(pinDx, pinDy) > 1.0) ? atan2(pinDx, -pinDy) : 0.0
+            let hasHandDirect = (puppet.partImages[side.handSlot] != nil)
+            let handFallbackSlot: PuppetPartSlot = side.isLeft ? .rightHand : .leftHand
+            let hasHandFallback = (puppet.partImages[handFallbackSlot] != nil)
+            let hasAnyHand = (puppet.partEnabled[side.handSlot] != false) && (hasHandDirect || hasHandFallback)
 
-                let finalHandW: CGFloat = baseHandW * puppet.partWidth(for: side.handSlot)
-                let finalHandH: CGFloat = baseHandH * puppet.partHeight(for: side.handSlot)
-                let partRotRad: CGFloat = CGFloat(puppet.partRotationDegrees(for: side.handSlot) * .pi / 180.0)
-                let flipH: CGFloat = puppet.isPartFlippedH(side.handSlot) ? -1.0 : 1.0
-                let flipV: CGFloat = puppet.isPartFlippedV(side.handSlot) ? -1.0 : 1.0
-                let avgCurl: CGFloat = {
-                    guard let hand = trackedHand, !hand.fingerCurls.isEmpty else { return 0.0 }
-                    return CGFloat(hand.fingerCurls.reduce(0, +) / Float(hand.fingerCurls.count))
-                }()
-                let curlSquashY: CGFloat = 1.0 - (avgCurl * 0.16)
+            if hasAnyHand {
+                let activeHandSlot = hasHandDirect ? side.handSlot : handFallbackSlot
+                if let handImg = puppet.partImages[activeHandSlot] {
+                    let needsHandMirror = !hasHandDirect && hasHandFallback
+                    let wristUV = puppet.pin(in: activeHandSlot, id: "wristPivot")
+                    let knuckleUV = puppet.pin(in: activeHandSlot, id: "middleKnuckle")
+                    let handAspect: CGFloat = handImg.size.width / max(1.0, handImg.size.height)
+                    let baseHandH: CGFloat = size.height * CGFloat(puppet.handScale) * clampedScale * handDepthScale
+                    let baseHandW: CGFloat = baseHandH * handAspect
+                    let pinDx: CGFloat = (knuckleUV.x - wristUV.x) * baseHandW
+                    let pinDy: CGFloat = (knuckleUV.y - wristUV.y) * baseHandH
+                    let intrinsicHandAngle: CGFloat = (hypot(pinDx, pinDy) > 1.0) ? atan2(pinDx, -pinDy) : 0.0
 
-                let hOff = puppet.partOffset(for: side.handSlot)
-                let handPivotPt = CGPoint(x: wristStage.x + hOff.width * offsetUnit, y: wristStage.y + hOff.height * offsetUnit)
-                let totalHandRot: CGFloat = rawHandAngle + torsoChainRotRad + upperChainRotRad + (hasForearm ? foreChainRotRad : 0.0) + partRotRad - intrinsicHandAngle
-                let xfData = makeAnchoredTransform(
-                    pivotStage: handPivotPt,
-                    rotationRad: totalHandRot,
-                    flipX: signedPalmFlipX * flipH,
-                    flipY: flipV * curlSquashY,
-                    pivotUV: wristUV,
-                    width: finalHandW,
-                    height: finalHandH
-                )
-                let drawRect = CGRect(x: 0, y: 0, width: finalHandW, height: finalHandH)
-                partsBySlot[side.handSlot] = PlacedStagePart(
-                    slot: side.handSlot,
-                    image: handImg,
-                    localBounds: drawRect,
-                    localToStage: xfData.localToStage,
-                    boxSize: xfData.boxSize,
-                    boxToStage: xfData.boxToStage,
-                    pivotInBox: xfData.pivotInBox
-                ) { context in
-                    var handCtx = context
-                    handCtx.concatenate(xfData.localToStage)
-                    handCtx.draw(Image(nsImage: handImg), in: drawRect)
-                }
+                    let handXf = resolvedMirrorTransform(slot: side.handSlot, fallbackSlot: handFallbackSlot, needsMirror: needsHandMirror)
+                    let finalHandW: CGFloat = baseHandW * handXf.width
+                    let finalHandH: CGFloat = baseHandH * handXf.height
+                    let partRotRad: CGFloat = CGFloat(handXf.rotDeg * .pi / 180.0)
+                    let flipH: CGFloat = handXf.flipH ? -1.0 : 1.0
+                    let flipV: CGFloat = handXf.flipV ? -1.0 : 1.0
+                    let avgCurl: CGFloat = {
+                        guard let hand = trackedHand, !hand.fingerCurls.isEmpty else { return 0.0 }
+                        return CGFloat(hand.fingerCurls.reduce(0, +) / Float(hand.fingerCurls.count))
+                    }()
+                    let curlSquashY: CGFloat = 1.0 - (avgCurl * 0.16)
 
-                if let hand = trackedHand {
-                    let visScale: CGFloat = size.height * CGFloat(puppet.handScale) * clampedScale * handDepthScale * 1.8
-                    handChains.append((handPivotPt, hand, visScale))
+                    // Effective hand orientation:
+                    // If thumb is extended independently (e.g. thumbs up or pointing gesture), blend towards thumb vector
+                    let effectiveHandAngle: CGFloat = {
+                        guard let hand = trackedHand else { return rawHandAngle }
+                        let thumbCurl = hand.fingerCurls.first ?? 0.0
+                        let indexCurl = hand.fingerCurls.count > 1 ? hand.fingerCurls[1] : 0.0
+                        if thumbCurl < 0.35 && indexCurl > 0.65 {
+                            return CGFloat(hand.thumbAngle)
+                        }
+                        return rawHandAngle
+                    }()
+
+                    let hOff = puppet.partOffset(for: side.handSlot)
+                    let handPivotPt = CGPoint(x: wristStage.x + hOff.width * offsetUnit, y: wristStage.y + hOff.height * offsetUnit)
+                    let totalHandRot: CGFloat = effectiveHandAngle + partRotRad - intrinsicHandAngle
+                    let defaultHandSignX: CGFloat = needsHandMirror ? -1.0 : 1.0
+                    let finalFlipX: CGFloat = defaultHandSignX * signedPalmFlipX * flipH
+
+                    let xfData = makeAnchoredTransform(
+                        pivotStage: handPivotPt,
+                        rotationRad: totalHandRot,
+                        flipX: finalFlipX,
+                        flipY: flipV * curlSquashY,
+                        pivotUV: wristUV,
+                        width: finalHandW,
+                        height: finalHandH
+                    )
+                    let drawRect = CGRect(x: 0, y: 0, width: finalHandW, height: finalHandH)
+                    partsBySlot[side.handSlot] = PlacedStagePart(
+                        slot: side.handSlot,
+                        image: handImg,
+                        localBounds: drawRect,
+                        localToStage: xfData.localToStage,
+                        boxSize: xfData.boxSize,
+                        boxToStage: xfData.boxToStage,
+                        pivotInBox: xfData.pivotInBox
+                    ) { context in
+                        var handCtx = context
+                        handCtx.concatenate(xfData.localToStage)
+                        handCtx.draw(Image(nsImage: handImg), in: drawRect)
+                    }
+
+                    if let hand = trackedHand {
+                        let visScale: CGFloat = size.height * CGFloat(puppet.handScale) * clampedScale * handDepthScale * 1.8
+                        handChains.append((handPivotPt, hand, visScale))
+                    }
                 }
             }
         }
@@ -2331,8 +2405,8 @@ public struct PuppetStageView: View {
         let dx = targetWrist.x - shoulder.x
         let dy = targetWrist.y - shoulder.y
         let rawDist = max(1.0, hypot(dx, dy))
-        // Human Anatomy Constraints limit maximum arm extension so elbows retain natural bend
-        let constraintLimit = 0.96 - CGFloat(puppet.humanAnatomyConstraints) * 0.14
+        // Human Anatomy Constraints limit maximum arm extension so elbows retain natural bend without dog-legging
+        let constraintLimit = 0.99 - CGFloat(puppet.humanAnatomyConstraints) * 0.04
         let maxReach = (len1 + len2) * constraintLimit
         let minReach = abs(len1 - len2) + 4.0
         let d = max(minReach, min(maxReach, rawDist))
@@ -2360,10 +2434,11 @@ public struct PuppetStageView: View {
             return (dotPlus >= dotMinus) ? ptPlus : ptMinus
         }
 
-        // Default: choose whichever elbow points further OUTWARD from the body (left for Left arm, right for Right arm)
+        // Default: choose whichever elbow points naturally outward and away from the body / head
         let outSign: CGFloat = isLeftArm ? -1.0 : 1.0
-        let scorePlus = outSign * (ptPlus.x - shoulder.x)
-        let scoreMinus = outSign * (ptMinus.x - shoulder.x)
+        let isRaised = dy < 0
+        let scorePlus = outSign * (ptPlus.x - shoulder.x) - (isRaised ? (ptPlus.y - shoulder.y) * 0.45 : 0.0)
+        let scoreMinus = outSign * (ptMinus.x - shoulder.x) - (isRaised ? (ptMinus.y - shoulder.y) * 0.45 : 0.0)
         return (scorePlus >= scoreMinus) ? ptPlus : ptMinus
     }
 

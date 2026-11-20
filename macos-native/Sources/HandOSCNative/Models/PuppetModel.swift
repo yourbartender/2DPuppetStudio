@@ -1357,12 +1357,18 @@ public final class PuppetController: ObservableObject {
         map[.leftForearm] = forearmPins
         map[.rightForearm] = forearmPins
 
-        let handPins = [
-            PuppetControlPin(id: "wristPivot", name: "Wrist Pivot", trackedSourceLabel: "Hand Wrist (Landmark 0)", x: 0.50, y: 0.20),
-            PuppetControlPin(id: "middleKnuckle", name: "Finger Direction", trackedSourceLabel: "Hand Middle MCP (Landmark 9)", x: 0.50, y: 0.78)
+        let leftHandPins = [
+            PuppetControlPin(id: "wristPivot", name: "Wrist Pivot", trackedSourceLabel: "Hand Wrist (Landmark 0)", x: 0.50, y: 0.16),
+            PuppetControlPin(id: "middleKnuckle", name: "Finger Direction", trackedSourceLabel: "Hand Middle MCP / Fingers (Landmark 9)", x: 0.50, y: 0.82),
+            PuppetControlPin(id: "thumbPin", name: "Thumb Direction", trackedSourceLabel: "Thumb Tip / Grasp Vector (Landmark 4)", x: 0.28, y: 0.52)
         ]
-        map[.leftHand] = handPins
-        map[.rightHand] = handPins
+        let rightHandPins = [
+            PuppetControlPin(id: "wristPivot", name: "Wrist Pivot", trackedSourceLabel: "Hand Wrist (Landmark 0)", x: 0.50, y: 0.16),
+            PuppetControlPin(id: "middleKnuckle", name: "Finger Direction", trackedSourceLabel: "Hand Middle MCP / Fingers (Landmark 9)", x: 0.50, y: 0.82),
+            PuppetControlPin(id: "thumbPin", name: "Thumb Direction", trackedSourceLabel: "Thumb Tip / Grasp Vector (Landmark 4)", x: 0.72, y: 0.52)
+        ]
+        map[.leftHand] = leftHandPins
+        map[.rightHand] = rightHandPins
 
         map[.pelvis] = [
             PuppetControlPin(id: "waistJoint", name: "Waist Joint", trackedSourceLabel: "Supports Torso Waist Pivot", x: 0.50, y: 0.22),

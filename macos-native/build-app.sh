@@ -15,6 +15,9 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BIN_PATH" "$APP_DIR/Contents/MacOS/HandOSCNative"
 cp "Info.plist" "$APP_DIR/Contents/Info.plist"
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp "Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
+fi
 if [ -d "Resources/AuroraFox" ]; then
     cp -R "Resources/AuroraFox" "$APP_DIR/Contents/Resources/AuroraFox"
 fi

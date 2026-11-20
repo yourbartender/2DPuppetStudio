@@ -573,6 +573,15 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             let screenMidX = s.mirror ? (1.0 - smoothed[9].x) : smoothed[9].x
             let wristAngle = atan2(screenMidX - screenWristX, -(smoothed[9].y - smoothed[0].y))
 
+            // Dedicated thumb direction in screen space (Landmark 1/2 base to Landmark 4 tip)
+            let screenThumbBaseX = s.mirror ? (1.0 - smoothed[1].x) : smoothed[1].x
+            let screenThumbTipX = s.mirror ? (1.0 - smoothed[4].x) : smoothed[4].x
+            let thumbDx = screenThumbTipX - screenThumbBaseX
+            let thumbDy = -(smoothed[4].y - smoothed[1].y)
+            let rawThumbAngle = (hypot(thumbDx, thumbDy) > 1e-4) ? atan2(thumbDx, thumbDy) : wristAngle
+            let thumbAngle = smoother.filter(key: "TA_\(finalLabel)", value: rawThumbAngle, timestampSec: nowSec, maxJump: 0.35)
+            let thumbSpread = thumbAngle - wristAngle
+
             // Depth scale (closer to camera -> larger) and 3D palm orientation (palm vs back-of-hand)
             let rawHandScale = GestureClassifier.handDepthScale(smoothed)
             let smoothedHandScale = smoother.filter(key: "HS_\(finalLabel)", value: rawHandScale, timestampSec: nowSec, maxJump: 0.25)
@@ -590,6 +599,8 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
                 gestureScore: gScore,
                 pinch: pinch,
                 wristAngle: wristAngle,
+                thumbAngle: thumbAngle,
+                thumbSpread: thumbSpread,
                 scale: smoothedHandScale,
                 palmFacingSign: smoothedPalmSign,
                 fingerCurls: curls
