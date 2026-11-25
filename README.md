@@ -13,10 +13,11 @@ A high-performance 2D character rigging, live AI motion capture, and OSC (Open S
   * **Character-Only NDI Video Output** (`BGRA` transparent alpha or Chroma/White) via runtime NDI detection (`/usr/local/lib/libndi.dylib`) and **Live Camera / Video / Photo** reference tracking input.
   * Low-latency UDP OSC packet streaming (default `127.0.0.1:9000`).
   * See [macos-native/README.md](macos-native/README.md) for dedicated native architecture docs.
-* **`electron/` & `src/` — Cross-Platform Desktop & Web App (React 19, Vite, MediaPipe)**:
-  * MediaPipe Hand Landmarker, Pose, and Face Landmarker running locally/offline with bundled WASM runtimes.
-  * Native UDP socket broadcasting via Electron bridge (`npm run package:mac`).
-  * See [ELECTRON.md](ELECTRON.md) for build, development, and packaging instructions.
+* **`electron/` & `src/` — Cross-Platform Desktop & Web App (Windows, Linux, macOS — React 19, Vite, MediaPipe)**:
+  * Full **2D Puppet Studio** parity for PC/Windows, Linux, and macOS: live 60 FPS HTML5 Canvas puppet stage, 4 workspace modes (`Split`, `2D Puppet Studio`, `Full Stage Preview` + Clean Feed, `Camera & OSC`), Photoshop `.PSD` multi-layer importer, Paper Puppet Sheet auto-slicer, interactive Pin Rigging editor, outward 2-bone Arm/Leg IK, local-axis palm flip & back-of-hand swap, 52 ARKit blendshape visemes/winks, Live Camera / Video / Photo reference input, Undo/Redo, and **100% `.puppet.json` compatibility** with the native macOS app.
+  * Offline MediaPipe Hand Gesture, Full-Body Pose, and 478-point Face + 52 Blendshapes models bundled locally with WASM runtime.
+  * Native UDP OSC broadcasting via Electron bridge (`npm run start:electron`, `npm run package:win`, `npm run package:mac`, `npm run package:linux`).
+  * See [ELECTRON.md](ELECTRON.md) for Windows, Linux, and macOS build & packaging instructions.
 
 ---
 
