@@ -10,8 +10,9 @@
     "build": "vite build",
     "build:dev": "vite build --mode development",
     "build:electron": "vite build --config vite.electron.config.ts",
-    "package:mac": "npm run build:electron && npm exec electron-packager -- . HandOSC --platform=darwin --arch=arm64 --out=electron-release --overwrite --prune=true",
-    "package:mac:intel": "npm run build:electron && npm exec electron-packager -- . HandOSC --platform=darwin --arch=x64 --out=electron-release --overwrite --prune=true",
+    "package:mac": "npm run build:electron && npm exec electron-packager -- . \"Puppet Studio\" --platform=darwin --arch=arm64 --icon=macos-native/Resources/AppIcon.icns --out=electron-release --overwrite --prune=true",
+    "package:mac:intel": "npm run build:electron && npm exec electron-packager -- . \"Puppet Studio\" --platform=darwin --arch=x64 --icon=macos-native/Resources/AppIcon.icns --out=electron-release --overwrite --prune=true",
+    "package:win": "npm run build:electron && npm exec electron-packager -- . \"Puppet Studio\" --platform=win32 --arch=x64 --out=electron-release --overwrite --prune=true",
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write ."

@@ -1,6 +1,6 @@
-# HandOSC Native & 2D Puppet Studio (macOS Swift)
+# Puppet Studio (Native macOS Swift)
 
-A high-performance, zero-dependency native macOS application built with Swift and SwiftUI. It tracks **hands**, **body pose**, and **face landmarks & expressions** using Apple's Neural Engine via the `Vision` + `AVFoundation` frameworks, drives a real-time **2D Puppet Animator**, and broadcasts normalized **OSC (Open Sound Control) over UDP**.
+A high-performance, zero-dependency native macOS application built with Swift and SwiftUI. It tracks **hands**, **body pose**, and **face landmarks & expressions** using Apple's Neural Engine via the `Vision` + `AVFoundation` frameworks, drives a real-time **2D Puppet Animator**, imports **Photoshop (.PSD)** layered characters, and broadcasts normalized **OSC (Open Sound Control) over UDP**.
 
 ---
 
@@ -10,15 +10,24 @@ A high-performance, zero-dependency native macOS application built with Swift an
 # Build the native macOS .app bundle (release mode)
 ./macos-native/build-app.sh
 
-# Launch the app
-open "macos-native/build/HandOSC Native.app"
+# Launch Puppet Studio
+open "macos-native/build/Puppet Studio.app"
 ```
 
 ---
 
 ## Key Features & Capabilities
 
-### 1. 2D Puppet Studio & Character Rigging
+### 1. Photoshop (.PSD) Multi-Layer Import & Character Creation (⌘N)
+* **Photoshop & Procreate (.PSD) Zero-Dependency Importer**:
+  * Direct binary parser for RGB 8-bit PSD files with PackBits RLE decompression.
+  * Automatic boundary trimming of transparent margins for each layer.
+  * Intelligent multilingual layer-to-slot auto-mapping (Finnish & English: `Pää`, `Vartalo`, `Olkavarsi`, `Kyynärvarsi`, `Kämmen`, `Reisi`, `Sääri`, `Jalkaterä`, `Silmä`, `Suu`, etc.).
+  * **Smart Joint & Pin Solver**: Automatically derives exact joint anchors (Neck mount, eye pupils, eyebrow warp, mouth visemes, and shoulder sockets) directly from layer overlaps on your Photoshop canvas!
+* **New Puppet Workflow (⌘N)**:
+  * Unified character creation dialog: **Import Layered Photoshop (.PSD)**, **Import Paper Puppet Sprite Sheet**, or **Start Blank Human Rig**.
+
+### 2. 2D Puppet Studio & Character Rigging
 * **Symmetrical Front-Facing Architecture**: Designed from the ground up for clean, anatomically balanced characters (humanoids, stylized characters, robots, fantasy rigs).
 * **Paper Puppet Sheet Auto-Slicer & AI Guide**:
   * One-click import of traditional cut-out sprite sheets (transparent PNG/WebP or solid black/custom backgrounds).

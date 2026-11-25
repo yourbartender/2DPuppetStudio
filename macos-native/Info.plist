@@ -11,9 +11,9 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>HandOSC Native</string>
+    <string>Puppet Studio</string>
     <key>CFBundleDisplayName</key>
-    <string>HandOSC Native</string>
+    <string>Puppet Studio</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
@@ -27,7 +27,7 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSCameraUsageDescription</key>
-    <string>HandOSC Native uses your camera to track hand, body pose, and face landmarks in real time for OSC output.</string>
+    <string>Puppet Studio uses your camera to track hand, body pose, and face landmarks in real time to animate 2D character puppets and stream OSC.</string>
     <key>NSQuitAlwaysKeepsWindows</key>
     <false/>
     <key>NSSupportsAutomaticTermination</key>

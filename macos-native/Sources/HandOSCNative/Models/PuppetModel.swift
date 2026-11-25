@@ -97,9 +97,11 @@ public enum PuppetPartSlot: String, CaseIterable, Identifiable, Codable, Sendabl
     case leftUpperArm = "leftUpperArm"
     case leftForearm = "leftForearm"
     case leftHand = "leftHand"
+    case leftHandBack = "leftHandBack"
     case rightUpperArm = "rightUpperArm"
     case rightForearm = "rightForearm"
     case rightHand = "rightHand"
+    case rightHandBack = "rightHandBack"
 
     // 3. Pelvis, Tail & Legs
     case pelvis = "pelvis"
@@ -117,7 +119,7 @@ public enum PuppetPartSlot: String, CaseIterable, Identifiable, Codable, Sendabl
         switch self {
         case .head, .eyesOpen, .rightEyeOpen, .eyesClosed, .rightEyeClosed, .noseOverlay, .browsOverlay, .rightBrows, .mouthNeutral, .mouthAh, .mouthOh, .mouthSmile:
             return .headAndExpressions
-        case .torso, .leftUpperArm, .leftForearm, .leftHand, .rightUpperArm, .rightForearm, .rightHand:
+        case .torso, .leftUpperArm, .leftForearm, .leftHand, .leftHandBack, .rightUpperArm, .rightForearm, .rightHand, .rightHandBack:
             return .upperBodyAndArms
         case .pelvis, .tail, .leftThigh, .leftShin, .leftFoot, .rightThigh, .rightShin, .rightFoot:
             return .lowerBodyAndLegs
@@ -142,9 +144,11 @@ public enum PuppetPartSlot: String, CaseIterable, Identifiable, Codable, Sendabl
         case .leftUpperArm: return "L Upper Arm"
         case .leftForearm: return "L Forearm"
         case .leftHand: return "L Hand"
+        case .leftHandBack: return "L Hand (Back)"
         case .rightUpperArm: return "R Upper Arm"
         case .rightForearm: return "R Forearm"
         case .rightHand: return "R Hand"
+        case .rightHandBack: return "R Hand (Back)"
         case .pelvis: return "Pelvis"
         case .tail: return "Tail"
         case .leftThigh: return "L Thigh"
@@ -174,9 +178,11 @@ public enum PuppetPartSlot: String, CaseIterable, Identifiable, Codable, Sendabl
         case .leftUpperArm: return "Connects Left Shoulder to Elbow"
         case .leftForearm: return "Connects Left Elbow to Wrist"
         case .leftHand: return "Follows tracked Left Hand position & wrist rotation"
+        case .leftHandBack: return "Swapped in for Left Hand when back of hand faces camera (Dynamic Palm Flip)"
         case .rightUpperArm: return "Connects Right Shoulder to Elbow"
         case .rightForearm: return "Connects Right Elbow to Wrist"
         case .rightHand: return "Follows tracked Right Hand position & wrist rotation"
+        case .rightHandBack: return "Swapped in for Right Hand when back of hand faces camera (Dynamic Palm Flip)"
         case .pelvis: return "Attaches under Torso Waist Pivot; Legs attach to Hips"
         case .tail: return "Attaches behind lower torso/waist and sways with movement"
         case .leftThigh: return "Connects Left Hip to Knee"
@@ -198,8 +204,8 @@ public enum PuppetPartSlot: String, CaseIterable, Identifiable, Codable, Sendabl
         case .mouthNeutral, .mouthAh, .mouthOh, .mouthSmile: return "mouth"
         case .torso: return "person.bust"
         case .leftUpperArm, .leftForearm, .rightUpperArm, .rightForearm: return "figure.arms.open"
-        case .leftHand: return "hand.raised.fill"
-        case .rightHand: return "hand.raised"
+        case .leftHand, .rightHandBack: return "hand.raised.fill"
+        case .rightHand, .leftHandBack: return "hand.raised"
         case .pelvis: return "figure.stand"
         case .tail: return "wind"
         case .leftThigh, .leftShin, .rightThigh, .rightShin, .leftFoot, .rightFoot: return "figure.walk"
@@ -341,6 +347,10 @@ public struct PuppetPersistedRigState: Codable {
     public var jawWarpEnabled: Bool?
     public var followChildrenOnMove: Bool?
     public var followChildrenOnRotate: Bool?
+    public var armReachExaggeration: Double?
+    public var lastPSDFilePath: String?
+    public var savedPSDSlotsByLayerKey: [String: [String]]?
+    public var savedPSDEnabledByLayerKey: [String: Bool]?
 }
 
 private struct PuppetUndoSnapshot {
@@ -361,6 +371,22 @@ private struct PuppetUndoSnapshot {
     let partOffsetY: [PuppetPartSlot: Double]
     let puppetStageOffset: CGSize
     let idleMotionAmount: Double
+    let characterScale: Double
+    let handScale: Double
+    let armLengthScale: Double
+    let armThicknessScale: Double
+    let armReachExaggeration: Double
+    let legLengthScale: Double
+    let legThicknessScale: Double
+    let eyeSpriteScale: Double
+    let noseSpriteScale: Double
+    let mouthSpriteScale: Double
+    let showFullBodyLegs: Bool
+    let followChildrenOnMove: Bool
+    let followChildrenOnRotate: Bool
+    let eyeAnimationMode: EyeAnimationMode
+    let mouthAnimationMode: MouthAnimationMode
+    let jawWarpEnabled: Bool
 }
 
 public final class PuppetController: ObservableObject {
@@ -377,6 +403,19 @@ public final class PuppetController: ObservableObject {
     @Published public var selectedPinId: String? = nil
     @Published public var showStageTransformBox: Bool = true
     @Published public var showSheetImporter: Bool = false
+    @Published public var showPSDImporter: Bool = false
+    @Published public var showNewPuppetModal: Bool = false
+
+    // Remembered PSD & Paper Sheet Importer State (persists across modal opens & restarts)
+    @Published public var cachedPSDURL: URL? = nil
+    @Published public var cachedPSDCanvasSize: CGSize = .zero
+    @Published public var cachedPSDLayers: [PSDLayer] = []
+    @Published public var cachedPSDSlotsByLayer: [UUID: Set<PuppetPartSlot>] = [:]
+    @Published public var cachedPSDEnabledByLayer: [UUID: Bool] = [:]
+    @Published public var lastPSDFilePath: String? = nil
+    public var savedPSDSlotsByLayerKey: [String: [String]] = [:]
+    public var savedPSDEnabledByLayerKey: [String: Bool] = [:]
+    @Published public var cachedCustomSheetImage: NSImage? = nil
     @Published public var partImages: [PuppetPartSlot: NSImage] = [:]
     @Published public var partFileNames: [PuppetPartSlot: String] = [:]
     @Published public var partEnabled: [PuppetPartSlot: Bool] = [:]
@@ -430,6 +469,7 @@ public final class PuppetController: ObservableObject {
     @Published public var handScale: Double = 0.16 { didSet { autoSaveIfNeeded() } }
     @Published public var armLengthScale: Double = 1.0 { didSet { autoSaveIfNeeded() } }
     @Published public var armThicknessScale: Double = 1.0 { didSet { autoSaveIfNeeded() } }
+    @Published public var armReachExaggeration: Double = 0.35 { didSet { autoSaveIfNeeded() } }
     @Published public var legLengthScale: Double = 1.0 { didSet { autoSaveIfNeeded() } }
     @Published public var legThicknessScale: Double = 1.0 { didSet { autoSaveIfNeeded() } }
     @Published public var showFullBodyLegs: Bool = true { didSet { autoSaveIfNeeded() } }
@@ -601,8 +641,86 @@ public final class PuppetController: ObservableObject {
             dynamicPalmFlip: dynamicPalmFlip,
             jawWarpEnabled: jawWarpEnabled,
             followChildrenOnMove: followChildrenOnMove,
-            followChildrenOnRotate: followChildrenOnRotate
+            followChildrenOnRotate: followChildrenOnRotate,
+            armReachExaggeration: armReachExaggeration,
+            lastPSDFilePath: lastPSDFilePath,
+            savedPSDSlotsByLayerKey: savedPSDSlotsByLayerKey.isEmpty ? nil : savedPSDSlotsByLayerKey,
+            savedPSDEnabledByLayerKey: savedPSDEnabledByLayerKey.isEmpty ? nil : savedPSDEnabledByLayerKey
         )
+    }
+
+    public static func psdLayerKey(_ layer: PSDLayer) -> String {
+        "\(layer.zOrder):\(layer.name)"
+    }
+
+    public func cachedPSDBackupURL(for preset: PuppetCharacterPreset? = nil) -> URL {
+        Self.customAssetDirectory(for: preset ?? activePreset).appendingPathComponent("last_imported.psd")
+    }
+
+    public func resolvedRememberedPSDURL() -> URL? {
+        let fm = FileManager.default
+        if let u = cachedPSDURL, fm.fileExists(atPath: u.path) {
+            return u
+        }
+        if let p = lastPSDFilePath, !p.isEmpty, fm.fileExists(atPath: p) {
+            return URL(fileURLWithPath: p)
+        }
+        if let udPath = UserDefaults.standard.string(forKey: "PuppetStudio.LastPSDPath.\(activePreset.rawValue)"),
+           !udPath.isEmpty,
+           fm.fileExists(atPath: udPath) {
+            return URL(fileURLWithPath: udPath)
+        }
+        let backup = cachedPSDBackupURL()
+        if fm.fileExists(atPath: backup.path) {
+            return backup
+        }
+        return nil
+    }
+
+    public func rememberPSDState(
+        url: URL?,
+        canvasSize: CGSize,
+        layers: [PSDLayer],
+        slotsByLayer: [UUID: Set<PuppetPartSlot>],
+        enabledByLayer: [UUID: Bool],
+        copyBackupToDisk: Bool = false
+    ) {
+        if let url = url {
+            cachedPSDURL = url
+            if url.lastPathComponent != "last_imported.psd" {
+                lastPSDFilePath = url.path
+                UserDefaults.standard.set(url.path, forKey: "PuppetStudio.LastPSDPath.\(activePreset.rawValue)")
+            } else if lastPSDFilePath == nil {
+                lastPSDFilePath = url.path
+            }
+        }
+        cachedPSDCanvasSize = canvasSize
+        cachedPSDLayers = layers
+        cachedPSDSlotsByLayer = slotsByLayer
+        cachedPSDEnabledByLayer = enabledByLayer
+
+        var slotKeys: [String: [String]] = [:]
+        var enabledKeys: [String: Bool] = [:]
+        for l in layers {
+            let key = Self.psdLayerKey(l)
+            if let assigned = slotsByLayer[l.id], !assigned.isEmpty {
+                slotKeys[key] = assigned.map(\.rawValue).sorted()
+            }
+            enabledKeys[key] = enabledByLayer[l.id] ?? false
+        }
+        savedPSDSlotsByLayerKey = slotKeys
+        savedPSDEnabledByLayerKey = enabledKeys
+
+        if copyBackupToDisk, let srcURL = url {
+            let dstURL = cachedPSDBackupURL()
+            if srcURL.standardizedFileURL != dstURL.standardizedFileURL {
+                DispatchQueue.global(qos: .utility).async {
+                    try? FileManager.default.removeItem(at: dstURL)
+                    try? FileManager.default.copyItem(at: srcURL, to: dstURL)
+                }
+            }
+        }
+        autoSaveIfNeeded()
     }
 
     private var saveWorkItem: DispatchWorkItem?
@@ -642,6 +760,79 @@ public final class PuppetController: ObservableObject {
         saveCurrentPresetState(immediate: true)
     }
 
+    /// Completely clears all current part graphics, file names, enabled flags, and optional disk-cached PNGs
+    /// so importing a new character (PSD, Sheet, or JSON) never leaks leftover sprites from an older rig.
+    public func clearAllPartGraphics(deleteDiskCache: Bool = false) {
+        partImages.removeAll()
+        partFileNames.removeAll()
+        customImagePaths.removeAll()
+        for slot in PuppetPartSlot.allCases {
+            partEnabled[slot] = false
+        }
+        if deleteDiskCache {
+            let dir = Self.customAssetDirectory(for: activePreset)
+            if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                for f in files where f.pathExtension.lowercased() == "png" {
+                    try? FileManager.default.removeItem(at: f)
+                }
+            }
+        }
+    }
+
+    /// Assigns a part image and persists it to the preset's CustomAssets folder without pushing an extra undo snapshot.
+    public func assignPartImageSilently(_ img: NSImage, label: String, for slot: PuppetPartSlot) {
+        partImages[slot] = img
+        partFileNames[slot] = label
+        partEnabled[slot] = true
+        let destURL = Self.customAssetDirectory(for: activePreset).appendingPathComponent("\(slot.rawValue).png")
+        if let tiff = img.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let pngData = rep.representation(using: .png, properties: [:]) {
+            try? pngData.write(to: destURL, options: .atomic)
+            customImagePaths[slot] = destURL.path
+        }
+    }
+
+    public func resetToBlankPuppet(named name: String = "New Puppet") {
+        recordUndoSnapshot()
+        characterName = name
+        clearAllPartGraphics(deleteDiskCache: true)
+        cachedPSDURL = nil
+        cachedPSDCanvasSize = .zero
+        cachedPSDLayers = []
+        cachedPSDSlotsByLayer = [:]
+        cachedPSDEnabledByLayer = [:]
+        lastPSDFilePath = nil
+        savedPSDSlotsByLayerKey = [:]
+        savedPSDEnabledByLayerKey = [:]
+        cachedCustomSheetImage = nil
+        try? FileManager.default.removeItem(at: cachedPSDBackupURL())
+        UserDefaults.standard.removeObject(forKey: "PuppetStudio.LastPSDPath.\(activePreset.rawValue)")
+        for slot in PuppetPartSlot.allCases {
+            partWidthScale[slot] = 1.0
+            partHeightScale[slot] = 1.0
+            partRotationOffset[slot] = 0.0
+            partFlipH[slot] = false
+            partFlipV[slot] = false
+            partOffsetX[slot] = 0.0
+            partOffsetY[slot] = 0.0
+        }
+        pinsBySlot = Self.defaultPins(for: .humanCharacter)
+        layerStack = Self.defaultLayerStack(for: .humanCharacter)
+        stagePuppetOffset = .zero
+        characterScale = 0.34
+        handScale = 0.16
+        armLengthScale = 1.0
+        armThicknessScale = 1.0
+        armReachExaggeration = 0.35
+        legLengthScale = 1.0
+        legThicknessScale = 1.0
+        showFullBodyLegs = true
+        selectedSlot = .head
+        selectedPinId = nil
+        saveCurrentPresetState(immediate: true)
+    }
+
     public func applyPersistedState(_ state: PuppetPersistedRigState) {
         let wasRestoring = isRestoringState
         isRestoringState = true
@@ -652,6 +843,13 @@ public final class PuppetController: ObservableObject {
                 name.hasPrefix("Aurora Fox ") ? PuppetPartSlot(rawValue: rawSlot) : nil
             }
         )
+
+        let hasEmbeddedBundle = (state.embeddedImagesBase64 != nil && !(state.embeddedImagesBase64?.isEmpty ?? true))
+        if hasEmbeddedBundle {
+            // Wipe all demo or previously cached sprites so missing slots in the saved character
+            // (e.g. no pelvis, no nose, no mouthOh) NEVER inherit old parts from another character!
+            clearAllPartGraphics(deleteDiskCache: true)
+        }
 
         for (rawSlot, pins) in state.pinsBySlot {
             if let slot = PuppetPartSlot(rawValue: rawSlot), !pins.isEmpty {
@@ -673,15 +871,17 @@ public final class PuppetController: ObservableObject {
                 partLayerOrder[slot] = order
             }
         }
-        for (rawSlot, path) in state.customImagePaths {
-            if let slot = PuppetPartSlot(rawValue: rawSlot),
-               !legacyFoxSlots.contains(slot),
-               FileManager.default.fileExists(atPath: path),
-               let img = NSImage(contentsOfFile: path) {
-                partImages[slot] = img
-                customImagePaths[slot] = path
-                if let fname = state.partFileNames[rawSlot] {
-                    partFileNames[slot] = fname
+        if !hasEmbeddedBundle {
+            for (rawSlot, path) in state.customImagePaths {
+                if let slot = PuppetPartSlot(rawValue: rawSlot),
+                   !legacyFoxSlots.contains(slot),
+                   FileManager.default.fileExists(atPath: path),
+                   let img = NSImage(contentsOfFile: path) {
+                    partImages[slot] = img
+                    customImagePaths[slot] = path
+                    if let fname = state.partFileNames[rawSlot] {
+                        partFileNames[slot] = fname
+                    }
                 }
             }
         }
@@ -791,10 +991,45 @@ public final class PuppetController: ObservableObject {
                    !legacyFoxSlots.contains(slot),
                    let data = Data(base64Encoded: b64),
                    let img = NSImage(data: data) {
-                    setCustomPartImage(img, label: state.partFileNames[rawSlot] ?? "\(slot.title).png", for: slot)
+                    assignPartImageSilently(img, label: state.partFileNames[rawSlot] ?? "\(slot.title).png", for: slot)
+                    if let explicitEnabled = state.partEnabled[rawSlot] {
+                        partEnabled[slot] = explicitEnabled
+                    }
+                }
+            }
+            // Ensure any slot without an image (and without a valid mirror partner) stays strictly disabled
+            for slot in PuppetPartSlot.allCases where partImages[slot] == nil {
+                let mirrorSource: PuppetPartSlot? = {
+                    switch slot {
+                    case .rightEyeOpen: return .eyesOpen
+                    case .rightEyeClosed: return .eyesClosed
+                    case .rightBrows: return .browsOverlay
+                    case .rightFoot: return .leftFoot
+                    case .rightHand: return .leftHand
+                    case .rightHandBack: return .leftHandBack
+                    case .rightUpperArm: return .leftUpperArm
+                    case .rightForearm: return .leftForearm
+                    case .rightThigh: return .leftThigh
+                    case .rightShin: return .leftShin
+                    default: return nil
+                    }
+                }()
+                if let ms = mirrorSource, partImages[ms] != nil, state.partEnabled[slot.rawValue] == true {
+                    partEnabled[slot] = true
+                } else {
+                    partEnabled[slot] = false
                 }
             }
         }
+
+        if let are = state.armReachExaggeration {
+            armReachExaggeration = are
+        }
+        if let psdPath = state.lastPSDFilePath, !psdPath.isEmpty {
+            lastPSDFilePath = psdPath
+        }
+        savedPSDSlotsByLayerKey = state.savedPSDSlotsByLayerKey ?? [:]
+        savedPSDEnabledByLayerKey = state.savedPSDEnabledByLayerKey ?? [:]
 
         if let ox = state.puppetStageOffsetX, let oy = state.puppetStageOffsetY {
             stagePuppetOffset = CGSize(width: ox, height: oy)
@@ -878,8 +1113,8 @@ public final class PuppetController: ObservableObject {
 
     // MARK: - Undo / Redo Management
 
-    public func recordUndoSnapshot() {
-        let snap = PuppetUndoSnapshot(
+    private func makeUndoSnapshot() -> PuppetUndoSnapshot {
+        PuppetUndoSnapshot(
             preset: activePreset,
             characterName: characterName,
             pinsBySlot: pinsBySlot,
@@ -896,10 +1131,30 @@ public final class PuppetController: ObservableObject {
             partOffsetX: partOffsetX,
             partOffsetY: partOffsetY,
             puppetStageOffset: stagePuppetOffset,
-            idleMotionAmount: idleMotionAmount
+            idleMotionAmount: idleMotionAmount,
+            characterScale: characterScale,
+            handScale: handScale,
+            armLengthScale: armLengthScale,
+            armThicknessScale: armThicknessScale,
+            armReachExaggeration: armReachExaggeration,
+            legLengthScale: legLengthScale,
+            legThicknessScale: legThicknessScale,
+            eyeSpriteScale: eyeSpriteScale,
+            noseSpriteScale: noseSpriteScale,
+            mouthSpriteScale: mouthSpriteScale,
+            showFullBodyLegs: showFullBodyLegs,
+            followChildrenOnMove: followChildrenOnMove,
+            followChildrenOnRotate: followChildrenOnRotate,
+            eyeAnimationMode: eyeAnimationMode,
+            mouthAnimationMode: mouthAnimationMode,
+            jawWarpEnabled: jawWarpEnabled
         )
-        undoStack.append(snap)
-        if undoStack.count > 40 {
+    }
+
+    public func recordUndoSnapshot() {
+        guard !isRestoringState else { return }
+        undoStack.append(makeUndoSnapshot())
+        if undoStack.count > 60 {
             undoStack.removeFirst()
         }
         redoStack.removeAll()
@@ -908,26 +1163,7 @@ public final class PuppetController: ObservableObject {
 
     public func undo() {
         guard let last = undoStack.popLast() else { return }
-        let current = PuppetUndoSnapshot(
-            preset: activePreset,
-            characterName: characterName,
-            pinsBySlot: pinsBySlot,
-            partImages: partImages,
-            partFileNames: partFileNames,
-            partEnabled: partEnabled,
-            partLayerOrder: partLayerOrder,
-            layerStack: layerStack,
-            partWidthScale: partWidthScale,
-            partHeightScale: partHeightScale,
-            partRotationOffset: partRotationOffset,
-            partFlipH: partFlipH,
-            partFlipV: partFlipV,
-            partOffsetX: partOffsetX,
-            partOffsetY: partOffsetY,
-            puppetStageOffset: stagePuppetOffset,
-            idleMotionAmount: idleMotionAmount
-        )
-        redoStack.append(current)
+        redoStack.append(makeUndoSnapshot())
         applySnapshot(last)
         updateUndoRedoFlags()
         saveCurrentPresetState()
@@ -935,32 +1171,16 @@ public final class PuppetController: ObservableObject {
 
     public func redo() {
         guard let next = redoStack.popLast() else { return }
-        let current = PuppetUndoSnapshot(
-            preset: activePreset,
-            characterName: characterName,
-            pinsBySlot: pinsBySlot,
-            partImages: partImages,
-            partFileNames: partFileNames,
-            partEnabled: partEnabled,
-            partLayerOrder: partLayerOrder,
-            layerStack: layerStack,
-            partWidthScale: partWidthScale,
-            partHeightScale: partHeightScale,
-            partRotationOffset: partRotationOffset,
-            partFlipH: partFlipH,
-            partFlipV: partFlipV,
-            partOffsetX: partOffsetX,
-            partOffsetY: partOffsetY,
-            puppetStageOffset: stagePuppetOffset,
-            idleMotionAmount: idleMotionAmount
-        )
-        undoStack.append(current)
+        undoStack.append(makeUndoSnapshot())
         applySnapshot(next)
         updateUndoRedoFlags()
         saveCurrentPresetState()
     }
 
     private func applySnapshot(_ s: PuppetUndoSnapshot) {
+        let wasRestoring = isRestoringState
+        isRestoringState = true
+        defer { isRestoringState = wasRestoring }
         activePreset = s.preset
         characterName = s.characterName
         pinsBySlot = s.pinsBySlot
@@ -978,6 +1198,22 @@ public final class PuppetController: ObservableObject {
         partOffsetY = s.partOffsetY
         stagePuppetOffset = s.puppetStageOffset
         idleMotionAmount = s.idleMotionAmount
+        characterScale = s.characterScale
+        handScale = s.handScale
+        armLengthScale = s.armLengthScale
+        armThicknessScale = s.armThicknessScale
+        armReachExaggeration = s.armReachExaggeration
+        legLengthScale = s.legLengthScale
+        legThicknessScale = s.legThicknessScale
+        eyeSpriteScale = s.eyeSpriteScale
+        noseSpriteScale = s.noseSpriteScale
+        mouthSpriteScale = s.mouthSpriteScale
+        showFullBodyLegs = s.showFullBodyLegs
+        followChildrenOnMove = s.followChildrenOnMove
+        followChildrenOnRotate = s.followChildrenOnRotate
+        eyeAnimationMode = s.eyeAnimationMode
+        mouthAnimationMode = s.mouthAnimationMode
+        jawWarpEnabled = s.jawWarpEnabled
     }
 
     // MARK: - Ordered Front-to-Back Stage Layer Stack
@@ -1250,6 +1486,27 @@ public final class PuppetController: ObservableObject {
         saveCurrentPresetState()
     }
 
+    /// Copies an existing part's exact sprite image, canvas padding, scale/flip settings, and compatible pins to another slot.
+    public func copyPartGraphic(from sourceSlot: PuppetPartSlot, to targetSlot: PuppetPartSlot) {
+        guard sourceSlot != targetSlot, let img = partImages[sourceSlot] else { return }
+        recordUndoSnapshot()
+        let srcName = partFileNames[sourceSlot] ?? sourceSlot.title
+        assignPartImageSilently(img, label: srcName, for: targetSlot)
+        partWidthScale[targetSlot] = partWidthScale[sourceSlot] ?? 1.0
+        partHeightScale[targetSlot] = partHeightScale[sourceSlot] ?? 1.0
+        partRotationOffset[targetSlot] = partRotationOffset[sourceSlot] ?? 0.0
+        partFlipH[targetSlot] = partFlipH[sourceSlot] ?? false
+        partFlipV[targetSlot] = partFlipV[sourceSlot] ?? false
+        partOffsetX[targetSlot] = partOffsetX[sourceSlot] ?? 0.0
+        partOffsetY[targetSlot] = partOffsetY[sourceSlot] ?? 0.0
+        if let srcPins = pinsBySlot[sourceSlot],
+           let dstPins = pinsBySlot[targetSlot],
+           srcPins.map(\.id) == dstPins.map(\.id) {
+            pinsBySlot[targetSlot] = srcPins
+        }
+        saveCurrentPresetState()
+    }
+
     public func removePartImage(slot: PuppetPartSlot) {
         recordUndoSnapshot()
         partImages.removeValue(forKey: slot)
@@ -1261,6 +1518,7 @@ public final class PuppetController: ObservableObject {
             case .rightEyeClosed: return .eyesClosed
             case .rightBrows: return .browsOverlay
             case .rightFoot: return .leftFoot
+            case .rightHandBack: return .leftHandBack
             default: return nil
             }
         }()
@@ -1285,6 +1543,15 @@ public final class PuppetController: ObservableObject {
         isRestoringState = true
         activePreset = preset
         customImagePaths.removeAll()
+        cachedPSDURL = nil
+        cachedPSDCanvasSize = .zero
+        cachedPSDLayers = []
+        cachedPSDSlotsByLayer = [:]
+        cachedPSDEnabledByLayer = [:]
+        lastPSDFilePath = nil
+        savedPSDSlotsByLayerKey = [:]
+        savedPSDEnabledByLayerKey = [:]
+        cachedCustomSheetImage = nil
         pinsBySlot = Self.defaultPins(for: preset)
 
         loadHumanDemoGraphics()
@@ -1368,7 +1635,9 @@ public final class PuppetController: ObservableObject {
             PuppetControlPin(id: "thumbPin", name: "Thumb Direction", trackedSourceLabel: "Thumb Tip / Grasp Vector (Landmark 4)", x: 0.72, y: 0.52)
         ]
         map[.leftHand] = leftHandPins
+        map[.leftHandBack] = leftHandPins
         map[.rightHand] = rightHandPins
+        map[.rightHandBack] = rightHandPins
 
         map[.pelvis] = [
             PuppetControlPin(id: "waistJoint", name: "Waist Joint", trackedSourceLabel: "Supports Torso Waist Pivot", x: 0.50, y: 0.22),
@@ -1476,7 +1745,7 @@ public final class PuppetController: ObservableObject {
     public func loadHumanDemoGraphics() {
         partImages.removeAll()
         for slot in PuppetPartSlot.allCases {
-            partEnabled[slot] = (slot != .browsOverlay && slot != .rightBrows && slot != .tail)
+            partEnabled[slot] = (slot != .browsOverlay && slot != .rightBrows && slot != .tail && slot != .leftHandBack && slot != .rightHandBack)
             partFileNames[slot] = "Demo \(slot.title)"
             partLayerOrder[slot] = (slot == .tail) ? .behindBody : .inFrontOfBody
         }
@@ -1997,9 +2266,11 @@ public enum PuppetSheetSlicer {
         .leftUpperArm,
         .leftForearm,
         .leftHand,
+        .leftHandBack,
         .rightUpperArm,
         .rightForearm,
         .rightHand,
+        .rightHandBack,
         .leftThigh,
         .leftShin,
         .leftFoot,
@@ -2311,10 +2582,70 @@ public enum PuppetSheetSlicer {
         return (processedSheet, islands)
     }
 
+    public static let exampleSheetCanvasSize = NSSize(width: 1360, height: 920)
+
+    /// Canonical top-down layout boxes used when generating the interactive Paper Puppet Sheet from an active character.
+    public static let exampleSheetSlotRects: [(slot: PuppetPartSlot, topRect: CGRect)] = [
+        // Far-left column: Left Leg (Thigh, Shin, Foot) & Tail
+        (.leftThigh, CGRect(x: 40, y: 40, width: 125, height: 220)),
+        (.leftShin, CGRect(x: 40, y: 290, width: 125, height: 220)),
+        (.leftFoot, CGRect(x: 40, y: 540, width: 125, height: 130)),
+        (.tail, CGRect(x: 40, y: 700, width: 125, height: 185)),
+
+        // Inner-left column: Left Arm (Upper, Forearm, Hand, Hand Back)
+        (.leftUpperArm, CGRect(x: 210, y: 40, width: 130, height: 220)),
+        (.leftForearm, CGRect(x: 210, y: 290, width: 130, height: 210)),
+        (.leftHand, CGRect(x: 210, y: 530, width: 120, height: 130)),
+        (.leftHandBack, CGRect(x: 210, y: 685, width: 120, height: 130)),
+
+        // Center column: Head, Torso, Pelvis
+        (.head, CGRect(x: 395, y: 30, width: 300, height: 300)),
+        (.torso, CGRect(x: 415, y: 365, width: 260, height: 310)),
+        (.pelvis, CGRect(x: 430, y: 710, width: 230, height: 175)),
+
+        // Inner-right column: Right Arm (Upper, Forearm, Hand, Hand Back)
+        (.rightUpperArm, CGRect(x: 740, y: 40, width: 135, height: 220)),
+        (.rightForearm, CGRect(x: 740, y: 290, width: 135, height: 210)),
+        (.rightHand, CGRect(x: 740, y: 530, width: 125, height: 130)),
+        (.rightHandBack, CGRect(x: 740, y: 685, width: 125, height: 130)),
+
+        // Outer-right column: Right Leg (Thigh, Shin, Foot)
+        (.rightThigh, CGRect(x: 915, y: 40, width: 125, height: 220)),
+        (.rightShin, CGRect(x: 915, y: 290, width: 125, height: 220)),
+        (.rightFoot, CGRect(x: 915, y: 540, width: 125, height: 130)),
+
+        // Far-right expression columns: Open Eyes, Closed Eyes, Brows, Nose, Mouth Visemes
+        (.eyesOpen, CGRect(x: 1090, y: 40, width: 105, height: 80)),
+        (.rightEyeOpen, CGRect(x: 1225, y: 40, width: 105, height: 80)),
+        (.eyesClosed, CGRect(x: 1090, y: 150, width: 105, height: 80)),
+        (.rightEyeClosed, CGRect(x: 1225, y: 150, width: 105, height: 80)),
+        (.browsOverlay, CGRect(x: 1090, y: 260, width: 105, height: 65)),
+        (.rightBrows, CGRect(x: 1225, y: 260, width: 105, height: 65)),
+        (.noseOverlay, CGRect(x: 1145, y: 355, width: 115, height: 85)),
+        (.mouthNeutral, CGRect(x: 1090, y: 470, width: 105, height: 80)),
+        (.mouthAh, CGRect(x: 1225, y: 470, width: 105, height: 80)),
+        (.mouthOh, CGRect(x: 1090, y: 580, width: 105, height: 80)),
+        (.mouthSmile, CGRect(x: 1225, y: 580, width: 105, height: 80))
+    ]
+
+    /// Finds which character part slot owns a normalized 0..1 point on `makeExamplePuppetSheet`.
+    public static func sourceSlotInExampleSheet(at normalizedPoint: CGPoint, in puppet: PuppetController) -> PuppetPartSlot? {
+        let px = normalizedPoint.x * exampleSheetCanvasSize.width
+        let py = normalizedPoint.y * exampleSheetCanvasSize.height
+        for (slot, rect) in exampleSheetSlotRects {
+            if rect.insetBy(dx: -8, dy: -8).contains(CGPoint(x: px, y: py)),
+               puppet.partEnabled[slot] != false,
+               puppet.partImages[slot] != nil {
+                return slot
+            }
+        }
+        return nil
+    }
+
     /// Builds a visual example of a traditional Paper Puppet Sheet using ALL active parts of the current character
     /// (including closed eyes, brows, all mouth visemes, pelvis, and 3-part legs) so every part is visible and exportable.
     public static func makeExamplePuppetSheet(from puppet: PuppetController) -> NSImage {
-        let size = NSSize(width: 1360, height: 920)
+        let size = exampleSheetCanvasSize
         let img = NSImage(size: size)
         img.lockFocus()
         guard let ctx = NSGraphicsContext.current?.cgContext else {
@@ -2322,49 +2653,7 @@ public enum PuppetSheetSlicer {
             return img
         }
 
-        // Slots defined in intuitive top-down coordinates (topY measured downward from top edge of sheet)
-        let slotsAndTopRects: [(PuppetPartSlot, CGRect)] = [
-            // Far-left column: Left Leg (Thigh, Shin, Foot) & Tail
-            (.leftThigh, CGRect(x: 40, y: 40, width: 125, height: 220)),
-            (.leftShin, CGRect(x: 40, y: 290, width: 125, height: 220)),
-            (.leftFoot, CGRect(x: 40, y: 540, width: 125, height: 130)),
-            (.tail, CGRect(x: 40, y: 700, width: 125, height: 185)),
-
-            // Inner-left column: Left Arm (Upper, Forearm, Hand)
-            (.leftUpperArm, CGRect(x: 210, y: 40, width: 130, height: 220)),
-            (.leftForearm, CGRect(x: 210, y: 290, width: 130, height: 210)),
-            (.leftHand, CGRect(x: 210, y: 530, width: 120, height: 130)),
-
-            // Center column: Head, Torso, Pelvis
-            (.head, CGRect(x: 395, y: 30, width: 300, height: 300)),
-            (.torso, CGRect(x: 415, y: 365, width: 260, height: 310)),
-            (.pelvis, CGRect(x: 430, y: 710, width: 230, height: 175)),
-
-            // Inner-right column: Right Arm (Upper, Forearm, Hand)
-            (.rightUpperArm, CGRect(x: 740, y: 40, width: 135, height: 220)),
-            (.rightForearm, CGRect(x: 740, y: 290, width: 135, height: 210)),
-            (.rightHand, CGRect(x: 740, y: 530, width: 125, height: 130)),
-
-            // Outer-right column: Right Leg (Thigh, Shin, Foot)
-            (.rightThigh, CGRect(x: 915, y: 40, width: 125, height: 220)),
-            (.rightShin, CGRect(x: 915, y: 290, width: 125, height: 220)),
-            (.rightFoot, CGRect(x: 915, y: 540, width: 125, height: 130)),
-
-            // Far-right expression columns: Open Eyes, Closed Eyes, Brows, Nose, Mouth Visemes
-            (.eyesOpen, CGRect(x: 1090, y: 40, width: 105, height: 80)),
-            (.rightEyeOpen, CGRect(x: 1225, y: 40, width: 105, height: 80)),
-            (.eyesClosed, CGRect(x: 1090, y: 150, width: 105, height: 80)),
-            (.rightEyeClosed, CGRect(x: 1225, y: 150, width: 105, height: 80)),
-            (.browsOverlay, CGRect(x: 1090, y: 260, width: 105, height: 65)),
-            (.rightBrows, CGRect(x: 1225, y: 260, width: 105, height: 65)),
-            (.noseOverlay, CGRect(x: 1145, y: 355, width: 115, height: 85)),
-            (.mouthNeutral, CGRect(x: 1090, y: 470, width: 105, height: 80)),
-            (.mouthAh, CGRect(x: 1225, y: 470, width: 105, height: 80)),
-            (.mouthOh, CGRect(x: 1090, y: 580, width: 105, height: 80)),
-            (.mouthSmile, CGRect(x: 1225, y: 580, width: 105, height: 80))
-        ]
-
-        for (slot, topRect) in slotsAndTopRects {
+        for (slot, topRect) in exampleSheetSlotRects {
             guard puppet.partEnabled[slot] != false,
                   let partImg = puppet.partImages[slot],
                   let cg = partImg.cgImage(forProposedRect: nil, context: nil, hints: nil) else { continue }

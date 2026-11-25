@@ -197,6 +197,7 @@ public enum GestureClassifier {
         public var anchorX: Float
         public var anchorY: Float
         public var interOcularDist: Float
+        public var verticalSkullSize: Float
         public var roll: Float
         public var yaw: Float
         public var pitch: Float
@@ -210,11 +211,12 @@ public enum GestureClassifier {
         public var keyPoints: [String: Landmark]
     }
 
-    /// Extracts skull-referenced (inter-ocular normalized) measurements that ignore beard/jaw noise
+    /// Extracts skull-referenced measurements that ignore beard/jaw noise and stay stable across head turns
     public static func measureFace(
         observation faceObs: VNFaceObservation,
         landmarks face: VNFaceLandmarks2D,
-        mirror: Bool
+        mirror: Bool,
+        aspectRatio: CGFloat = 16.0 / 9.0
     ) -> RawFaceMeasurements {
         let bbox = faceObs.boundingBox
 
@@ -263,10 +265,13 @@ public enum GestureClassifier {
             x: (screenLeftEye.x + screenRightEye.x) * 0.5,
             y: (screenLeftEye.y + screenRightEye.y) * 0.5
         )
-        let iod = max(Float(hypot(screenRightEye.x - screenLeftEye.x, screenRightEye.y - screenLeftEye.y)), 0.03)
+        let camAspect: CGFloat = max(0.35, min(3.0, aspectRatio))
+        // Isotropic Inter-Ocular Distance so head roll never stretches eye distance
+        let isoEyeDx = Float(screenRightEye.x - screenLeftEye.x)
+        let isoEyeDy = Float((screenRightEye.y - screenLeftEye.y) / camAspect)
+        let iod = max(hypot(isoEyeDx, isoEyeDy), 0.03)
 
-        // Eye-line tilt (roll) in aspect-corrected 16:9 camera space — completely unaffected by beard!
-        let camAspect: CGFloat = 16.0 / 9.0
+        // Eye-line tilt (roll) in aspect-corrected camera space — completely unaffected by beard!
         let eyeRoll = Float(atan2(screenRightEye.y - screenLeftEye.y, (screenRightEye.x - screenLeftEye.x) * camAspect))
 
         // Aspect-corrected, tilt-compensated Eye Aspect Ratio (EAR) so head tilt or 16:9 coordinates never distort eye height
@@ -305,13 +310,20 @@ public enum GestureClassifier {
         // Nose tip / center
         let noseCenter = nose?.bottom ?? nose?.center ?? CGPoint(x: eyeMid.x, y: eyeMid.y + CGFloat(iod * 0.6))
 
-        // Yaw & Pitch from nose position relative to eye midpoint + Vision pose
-        let geomYaw = Float(noseCenter.x - eyeMid.x) / iod * 2.2
+        // Smooth continuous geometric yaw (avoid Vision's coarse 45° quantized step jumps!)
+        let geomYaw = max(-1.2, min(1.2, Float(noseCenter.x - eyeMid.x) / iod * 1.95))
         let visionYaw: Float = {
             guard let y = faceObs.yaw?.floatValue else { return geomYaw }
             return mirror ? -y : y
         }()
-        let combinedYaw = visionYaw * 0.6 + geomYaw * 0.4
+        let combinedYaw = geomYaw * 0.82 + visionYaw * 0.18
+
+        // Roll-compensated vertical skull height (eye-line to nose base + bbox height):
+        // Vertical skull height does NOT foreshorten under horizontal head/body yaw!
+        let dNoseIsoX = Float((noseCenter.x - eyeMid.x) * camAspect)
+        let dNoseIsoY = Float(noseCenter.y - eyeMid.y)
+        let perpNoseVert = max(0.015, -dNoseIsoX * sin(eyeRoll) + dNoseIsoY * cos(eyeRoll))
+        let verticalSkullSize = max(0.025, perpNoseVert * 0.55 + Float(bbox.size.height) * 0.22)
 
         let noseEyeVert = Float(noseCenter.y - eyeMid.y) / iod
         let geomPitch = (noseEyeVert - 0.58) * 2.5
@@ -348,6 +360,7 @@ public enum GestureClassifier {
             anchorX: Float(eyeMid.x),
             anchorY: Float(eyeMid.y),
             interOcularDist: iod,
+            verticalSkullSize: verticalSkullSize,
             roll: eyeRoll,
             yaw: combinedYaw,
             pitch: geomPitch,
@@ -385,18 +398,40 @@ public enum GestureClassifier {
         let refEARL = baseline.isCalibrated ? max(0.16, min(0.36, baseline.neutralEyeAspectL)) : 0.25
         let refEARR = baseline.isCalibrated ? max(0.16, min(0.36, baseline.neutralEyeAspectR)) : 0.25
 
-        let headX = clamp((raw.anchorX - refX) * 3.2, -1.0, 1.0)
-        let headY = clamp((raw.anchorY - refY) * 3.2, -1.0, 1.0)
-        let headScale = clamp(raw.interOcularDist / refIOD, 0.5, 2.0)
         let rawRollDelta = raw.roll - refRoll
         // Small deadzone on roll (< 1.8 degrees) so neutral glasses sit at 0% tilt
         let roll = abs(rawRollDelta) < 0.032 ? 0.0 : rawRollDelta
         let yaw = clamp(raw.yaw - refYaw, -1.0, 1.0)
         let pitch = clamp(raw.pitch - refPitch, -1.0, 1.0)
 
-        // Compensate mouthOpen for head yaw foreshortening:
-        // As head turns, 2D IOD in denominator shrinks by cos(yaw), artificially inflating raw.mouthOpenRatio.
-        let yawCompensation = max(0.60, cos(yaw * 1.15))
+        // Yaw-invariant camera depth scale:
+        // Use vertical skull size (unaffected by horizontal head/body turns!) instead of dividing IOD by cos(yaw).
+        let refVertSkull = baseline.isCalibrated
+            ? max(0.025, baseline.neutralVerticalSkull ?? (refIOD * 1.12))
+            : (refIOD * 1.12)
+        let pitchComp = max(0.86, cos(pitch * 0.45))
+        let rawDepthScale = (raw.verticalSkullSize / pitchComp) / refVertSkull
+        // Apply ±3.5% deadzone around 1.0 so micro-movements and head turns never pump character size
+        let headScale: Float = {
+            if abs(rawDepthScale - 1.0) < 0.035 { return 1.0 }
+            let delta = rawDepthScale - 1.0
+            let stepped = delta - (delta > 0 ? 0.035 : -0.035)
+            return clamp(1.0 + stepped * 0.85, 0.72, 1.38)
+        }()
+        let yawCompensation = max(0.75, cos(yaw * 0.55))
+        let trueIOD = refIOD * headScale
+
+        // Separate pure head rotation (yaw/pitch around cervical spine) from true body X/Y translation:
+        // Eyes sit forward of the neck pivot, so turning/nodding in place shifts eyeMid without moving the torso.
+        let orbitShiftX = sin(yaw * 1.05) * trueIOD * 0.62
+        let orbitShiftY = sin(pitch * 0.85) * trueIOD * 0.45
+        let rawNeckDx = (raw.anchorX - orbitShiftX) - refX
+        let rawNeckDy = (raw.anchorY - orbitShiftY) - refY
+        let cleanDx: Float = abs(rawNeckDx) < 0.014 ? 0.0 : (rawNeckDx - (rawNeckDx > 0 ? 0.014 : -0.014))
+        let cleanDy: Float = abs(rawNeckDy) < 0.016 ? 0.0 : (rawNeckDy - (rawNeckDy > 0 ? 0.016 : -0.016))
+        let headX = clamp(cleanDx * 3.0, -1.0, 1.0)
+        let headY = clamp(cleanDy * 3.0, -1.0, 1.0)
+
         let compensatedMouthOpenRatio = raw.mouthOpenRatio * yawCompensation
         let rawMouthDelta = compensatedMouthOpenRatio - refMouthOpen
         // Noise gate deadzone: small fluctuations below 0.035 are clamped to 0.0 so turning head doesn't trigger talking!
@@ -535,17 +570,16 @@ public enum GestureClassifier {
         m.mouthPucker = mouthPucker
         m.browRaise = browRaise
         m.browFurrow = browFurrow
-        // Note: In mirrored selfie camera mode, the eye that appears on the right side of the screen
-        // is tracked by blinkR, and the eye on the left side of the screen is tracked by blinkL.
-        // We ensure screen parity so winking the eye on screen-right closes the screen-right character eye.
-        m.eyeBlinkL = blinkR
-        m.eyeBlinkR = blinkL
+        // Note: In measureFace(), earL/earR are already sorted by screen-left vs screen-right
+        // after camera mirroring, so blinkL closes the screen-left eye and blinkR closes the screen-right eye.
+        m.eyeBlinkL = blinkL
+        m.eyeBlinkR = blinkR
         m.viseme = viseme
         m.summaryLabel = summary
 
         let blendshapes: [(name: String, score: Float)] = [
-            ("eyeBlinkLeft", blinkR),
-            ("eyeBlinkRight", blinkL),
+            ("eyeBlinkLeft", blinkL),
+            ("eyeBlinkRight", blinkR),
             ("eyeWideLeft", wideL),
             ("eyeWideRight", wideR),
             ("jawOpen", mouthOpen),

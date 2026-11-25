@@ -1,8 +1,11 @@
 import Foundation
+import AppKit
 import AVFoundation
+import CoreImage
 import Vision
 import CoreMedia
 import Combine
+import UniformTypeIdentifiers
 
 public struct CameraDevice: Identifiable, Equatable, Hashable {
     public let id: String
@@ -49,6 +52,20 @@ public final class HolisticTracker: NSObject, ObservableObject, @unchecked Senda
     @Published public private(set) var calibrationBaseline = FaceCalibrationBaseline()
     @Published public private(set) var stats: TrackerStats = TrackerStats()
     @Published public private(set) var latestFrame: TrackedFrame = TrackedFrame()
+    @Published public private(set) var inputSource: TrackerInputSource = .camera
+    @Published public private(set) var mediaFileName: String? = nil
+    @Published public private(set) var mediaPreviewImage: NSImage? = nil
+    @Published public var isMediaPlaying: Bool = true {
+        didSet {
+            guard inputSource == .videoFile else { return }
+            if isMediaPlaying {
+                mediaPlayer?.play()
+            } else {
+                mediaPlayer?.pause()
+            }
+        }
+    }
+    @Published public private(set) var calibrationCountdown: Int = 0
 
     public let captureSession = AVCaptureSession()
 
@@ -59,19 +76,75 @@ public final class HolisticTracker: NSObject, ObservableObject, @unchecked Senda
     private let videoOutput = AVCaptureVideoDataOutput()
     private let oscClient = OSCClient()
     private let smoother = LandmarkSmoother(enabled: true, minCutoff: 16.0, beta: 3.2)
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    private var mediaPlayer: AVPlayer? = nil
+    private var mediaVideoOutput: AVPlayerItemVideoOutput? = nil
+    private var mediaEndObserver: NSObjectProtocol? = nil
+    private var mediaFeedTimer: DispatchSourceTimer? = nil
+    private var staticImagePixelBuffer: CVPixelBuffer? = nil
+    private var lastVideoPixelBuffer: CVPixelBuffer? = nil
+    private var countdownTimer: Timer? = nil
 
     private let settingsLock = NSLock()
     private var currentSettings = TrackerSettings()
     private var currentBaseline = FaceCalibrationBaseline()
     private var lastRawFace: GestureClassifier.RawFaceMeasurements? = nil
     private var recentRawFaces: [GestureClassifier.RawFaceMeasurements] = []
+    private var latestBodyProportions: (shoulderSpan: Float, upperArmLen: Float?, forearmLen: Float?)? = nil
+    private var _isModalPaused: Bool = false
+    private var _activeInputSource: TrackerInputSource = .camera
     private var isProcessing = false
     private let processLock = NSLock()
 
-    // Anti-flicker state & anatomical reconstruction caches (used only on captureQueue)
+    /// Temporarily suspends Vision frame publishing & media/camera capture while modal importer sheets are open
+    /// so AppKit/SwiftUI dropdown menus respond cleanly without needing to manually stop tracking.
+    public var isModalPaused: Bool {
+        get {
+            settingsLock.lock()
+            defer { settingsLock.unlock() }
+            return _isModalPaused
+        }
+        set {
+            settingsLock.lock()
+            let changed = (_isModalPaused != newValue)
+            _isModalPaused = newValue
+            let mode = _activeInputSource
+            settingsLock.unlock()
+            guard changed else { return }
+            if mode == .videoFile {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if newValue {
+                        self.mediaPlayer?.pause()
+                    } else if self.isMediaPlaying && self.isRunning {
+                        self.mediaPlayer?.play()
+                    }
+                }
+            } else if mode == .camera {
+                captureQueue.async { [weak self] in
+                    guard let self else { return }
+                    if newValue {
+                        if self.captureSession.isRunning {
+                            self.captureSession.stopRunning()
+                        }
+                    } else if self.isRunning && !self.captureSession.isRunning {
+                        self.captureSession.startRunning()
+                    }
+                }
+            }
+        }
+    }
+
+    // Anti-flicker & last-known pose hold caches (used only on captureQueue)
     private var lastValidHandRaw: [String: [Landmark]] = [:]
     private var lastValidTrackedHand: [String: (hand: TrackedHand, timestamp: Double)] = [:]
     private var lastValidPoseJoints: [Int: (landmark: Landmark, timestamp: Double)] = [:]
+    private var lastValidPoseFrame: [Landmark?] = []
+    private var lastValidPoseFreshMask: [Bool] = []
+    private var lastValidPoseTimestamp: Double = 0
+    private var lastValidFaceState: (metrics: FaceMetrics, timestamp: Double)? = nil
+    private var lastStableHeadScale: Float = 1.0
 
     private lazy var handRequest: VNDetectHumanHandPoseRequest = {
         let req = VNDetectHumanHandPoseRequest()
@@ -161,32 +234,61 @@ public final class HolisticTracker: NSObject, ObservableObject, @unchecked Senda
         return decoded
     }
 
-    /// Captures the user's current neutral face posture & lip/brow/eye geometry as the zero baseline,
-    /// averaging across recent frames so a single-frame jitter never corrupts calibration.
+    /// Hands-free 3-second countdown so the user can let go of the mouse and assume a neutral / A-pose before calibrating!
+    public func startCountdownCalibration(seconds: Int = 3) {
+        countdownTimer?.invalidate()
+        calibrationCountdown = max(1, seconds)
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            if self.calibrationCountdown > 1 {
+                self.calibrationCountdown -= 1
+            } else {
+                timer.invalidate()
+                self.countdownTimer = nil
+                self.calibrationCountdown = 0
+                NSSound.beep()
+                self.calibrateNeutralFace()
+            }
+        }
+    }
+
+    /// Captures the user's current neutral face posture AND visible shoulder/arm proportions (A-pose / T-pose / seated neutral)
+    /// as the zero baseline, averaging across recent frames so a single-frame jitter never corrupts calibration.
     public func calibrateNeutralFace() {
         settingsLock.lock()
         let samples = recentRawFaces.isEmpty ? (lastRawFace.map { [$0] } ?? []) : recentRawFaces
-        guard !samples.isEmpty else {
+        let bodyProps = latestBodyProportions
+        guard !samples.isEmpty || bodyProps != nil else {
             settingsLock.unlock()
             return
         }
-        let n = Float(samples.count)
-        var b = FaceCalibrationBaseline()
-        b.centerX = samples.reduce(0) { $0 + $1.anchorX } / n
-        b.centerY = samples.reduce(0) { $0 + $1.anchorY } / n
-        b.faceWidth = samples.reduce(0) { $0 + $1.interOcularDist } / n
-        b.rollOffset = samples.reduce(0) { $0 + $1.roll } / n
-        b.yawOffset = samples.reduce(0) { $0 + $1.yaw } / n
-        b.pitchOffset = samples.reduce(0) { $0 + $1.pitch } / n
-        b.neutralMouthRatio = samples.reduce(0) { $0 + $1.mouthOpenRatio } / n
-        b.neutralMouthWidth = samples.reduce(0) { $0 + $1.mouthWidthRatio } / n
-        b.neutralBrowEyeDist = samples.reduce(0) { $0 + $1.browEyeRatio } / n
-        b.neutralBrowEyeDistL = samples.reduce(0) { $0 + $1.browEyeRatioL } / n
-        b.neutralBrowEyeDistR = samples.reduce(0) { $0 + $1.browEyeRatioR } / n
-        b.neutralEyeAspectL = samples.reduce(0) { $0 + $1.eyeAspectL } / n
-        b.neutralEyeAspectR = samples.reduce(0) { $0 + $1.eyeAspectR } / n
-        b.neutralEyeAspect = (b.neutralEyeAspectL + b.neutralEyeAspectR) * 0.5
-        b.isCalibrated = true
+        var b = currentBaseline
+        if !samples.isEmpty {
+            let n = Float(samples.count)
+            b.centerX = samples.reduce(0) { $0 + $1.anchorX } / n
+            b.centerY = samples.reduce(0) { $0 + $1.anchorY } / n
+            b.faceWidth = samples.reduce(0) { $0 + $1.interOcularDist } / n
+            b.neutralVerticalSkull = samples.reduce(0) { $0 + $1.verticalSkullSize } / n
+            b.rollOffset = samples.reduce(0) { $0 + $1.roll } / n
+            b.yawOffset = samples.reduce(0) { $0 + $1.yaw } / n
+            b.pitchOffset = samples.reduce(0) { $0 + $1.pitch } / n
+            b.neutralMouthRatio = samples.reduce(0) { $0 + $1.mouthOpenRatio } / n
+            b.neutralMouthWidth = samples.reduce(0) { $0 + $1.mouthWidthRatio } / n
+            b.neutralBrowEyeDist = samples.reduce(0) { $0 + $1.browEyeRatio } / n
+            b.neutralBrowEyeDistL = samples.reduce(0) { $0 + $1.browEyeRatioL } / n
+            b.neutralBrowEyeDistR = samples.reduce(0) { $0 + $1.browEyeRatioR } / n
+            b.neutralEyeAspectL = samples.reduce(0) { $0 + $1.eyeAspectL } / n
+            b.neutralEyeAspectR = samples.reduce(0) { $0 + $1.eyeAspectR } / n
+            b.neutralEyeAspect = (b.neutralEyeAspectL + b.neutralEyeAspectR) * 0.5
+            b.isCalibrated = true
+        }
+        if let bp = bodyProps {
+            b.calibratedShoulderSpan = bp.shoulderSpan
+            if let u = bp.upperArmLen { b.calibratedUpperArmLen = u }
+            if let f = bp.forearmLen { b.calibratedForearmLen = f }
+            b.isBodyCalibrated = true
+            b.isCalibrated = true
+        }
         currentBaseline = b
         settingsLock.unlock()
         Self.saveBaselineToDisk(b)
@@ -229,11 +331,257 @@ public final class HolisticTracker: NSObject, ObservableObject, @unchecked Senda
         }
     }
 
-    private func startSession() {
-        let camId = selectedCameraId
+    private func resetTrackingCachesOnCaptureQueue() {
+        smoother.reset()
+        lastValidHandRaw.removeAll()
+        lastValidTrackedHand.removeAll()
+        lastValidPoseJoints.removeAll()
+        lastValidPoseFrame.removeAll()
+        lastValidPoseFreshMask.removeAll()
+        lastValidPoseTimestamp = 0
+        lastValidFaceState = nil
+        lastStableHeadScale = 1.0
+    }
+
+    private func stopMediaPipelineOnCaptureQueue() {
+        mediaFeedTimer?.cancel()
+        mediaFeedTimer = nil
+        mediaPlayer?.pause()
+        mediaPlayer = nil
+        mediaVideoOutput = nil
+        staticImagePixelBuffer = nil
+        lastVideoPixelBuffer = nil
+        if let obs = mediaEndObserver {
+            NotificationCenter.default.removeObserver(obs)
+            mediaEndObserver = nil
+        }
+    }
+
+    public func switchToLiveCamera() {
+        settingsLock.lock()
+        _activeInputSource = .camera
+        settingsLock.unlock()
+
+        DispatchQueue.main.async {
+            self.inputSource = .camera
+            self.mediaFileName = nil
+            self.mediaPreviewImage = nil
+            self.isMediaPlaying = true
+            if self.isRunning {
+                self.startSession()
+            } else {
+                self.isRunning = true
+            }
+        }
+    }
+
+    public func toggleMediaPlayback() {
+        guard inputSource == .videoFile else { return }
+        isMediaPlaying.toggle()
+    }
+
+    public func promptAndLoadVideoFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Reference Video for Pose & Expression Tracking"
+        panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            loadVideoFile(from: url)
+        }
+    }
+
+    public func promptAndLoadStillImage() {
+        let panel = NSOpenPanel()
+        panel.title = "Select Reference Photo for Pose & Expression Tracking"
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic, UTType(filenameExtension: "webp")].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            loadStillImage(from: url)
+        }
+    }
+
+    public func loadStillImage(from url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer {
+            if accessed { url.stopAccessingSecurityScopedResource() }
+        }
+        guard let nsImg = NSImage(contentsOf: url),
+              let pb = Self.makePixelBuffer(from: nsImg) else {
+            DispatchQueue.main.async {
+                self.stats.lastError = "Could not load image file '\(url.lastPathComponent)'."
+            }
+            return
+        }
+
+        settingsLock.lock()
+        _activeInputSource = .stillImage
+        settingsLock.unlock()
+
+        DispatchQueue.main.async {
+            self.inputSource = .stillImage
+            self.mediaFileName = url.lastPathComponent
+            self.mediaPreviewImage = nsImg
+            self.stats.lastError = nil
+            if !self.isRunning {
+                self.isRunning = true
+            }
+        }
+
         captureQueue.async { [weak self] in
             guard let self else { return }
-            self.smoother.reset()
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
+            self.stopMediaPipelineOnCaptureQueue()
+            self.resetTrackingCachesOnCaptureQueue()
+            self.staticImagePixelBuffer = pb
+
+            let timer = DispatchSource.makeTimerSource(queue: self.captureQueue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(66)) // 15 Hz steady tracking for live slider tuning
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.isModalPaused, let buf = self.staticImagePixelBuffer else { return }
+                self.processFrameBuffer(buf, timestampSec: CACurrentMediaTime())
+            }
+            self.mediaFeedTimer = timer
+            timer.resume()
+        }
+    }
+
+    public func loadVideoFile(from url: URL) {
+        settingsLock.lock()
+        _activeInputSource = .videoFile
+        settingsLock.unlock()
+
+        DispatchQueue.main.async {
+            self.inputSource = .videoFile
+            self.mediaFileName = url.lastPathComponent
+            self.isMediaPlaying = true
+            self.stats.lastError = nil
+            if !self.isRunning {
+                self.isRunning = true
+            }
+        }
+
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
+            self.stopMediaPipelineOnCaptureQueue()
+            self.resetTrackingCachesOnCaptureQueue()
+
+            let item = AVPlayerItem(url: url)
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ]
+            let vOut = AVPlayerItemVideoOutput(pixelBufferAttributes: attrs)
+            item.add(vOut)
+            let player = AVPlayer(playerItem: item)
+            player.isMuted = true
+            player.actionAtItemEnd = .none
+
+            self.mediaVideoOutput = vOut
+            self.mediaPlayer = player
+            self.mediaEndObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak player] _ in
+                player?.seek(to: .zero)
+                player?.play()
+            }
+
+            DispatchQueue.main.async {
+                player.play()
+            }
+
+            let timer = DispatchSource.makeTimerSource(queue: self.captureQueue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(33)) // 30 FPS video analysis + paused-frame support
+            timer.setEventHandler { [weak self] in
+                guard let self, !self.isModalPaused, let player = self.mediaPlayer, let vOut = self.mediaVideoOutput else { return }
+                let itemTime = player.currentTime()
+                var activeBuffer: CVPixelBuffer? = nil
+                var isNewFrame = false
+                if vOut.hasNewPixelBuffer(forItemTime: itemTime),
+                   let pb = vOut.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                    self.lastVideoPixelBuffer = pb
+                    activeBuffer = pb
+                    isNewFrame = true
+                } else {
+                    activeBuffer = self.lastVideoPixelBuffer
+                }
+
+                guard let pb = activeBuffer else { return }
+                if isNewFrame, let preview = self.makePreviewNSImage(from: pb) {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, !self.isModalPaused else { return }
+                        self.mediaPreviewImage = preview
+                    }
+                }
+                self.processFrameBuffer(pb, timestampSec: CACurrentMediaTime())
+            }
+            self.mediaFeedTimer = timer
+            timer.resume()
+        }
+    }
+
+    private func makePreviewNSImage(from pixelBuffer: CVPixelBuffer) -> NSImage? {
+        let ciImg = CIImage(cvPixelBuffer: pixelBuffer)
+        let srcW = ciImg.extent.width
+        let srcH = ciImg.extent.height
+        guard srcW > 4, srcH > 4 else { return nil }
+        let maxW: CGFloat = 640.0
+        let scale = min(1.0, maxW / srcW)
+        let scaled = scale < 0.99 ? ciImg.transformed(by: CGAffineTransform(scaleX: scale, y: scale)) : ciImg
+        guard let cgImg = ciContext.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return NSImage(cgImage: cgImg, size: NSSize(width: srcW, height: srcH))
+    }
+
+    private static func makePixelBuffer(from image: NSImage) -> CVPixelBuffer? {
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let maxDim: CGFloat = 1280.0
+        let scale = min(1.0, maxDim / CGFloat(max(cg.width, cg.height)))
+        let w = max(64, Int((CGFloat(cg.width) * scale).rounded()))
+        let h = max(64, Int((CGFloat(cg.height) * scale).rounded()))
+
+        var pb: CVPixelBuffer? = nil
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+        guard status == kCVReturnSuccess, let buffer = pb else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let baseAddr = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        guard let ctx = CGContext(
+            data: baseAddr,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: cs,
+            bitmapInfo: bitmapInfo
+        ) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return buffer
+    }
+
+    private func startSession() {
+        let camId = selectedCameraId
+        settingsLock.lock()
+        let mode = _activeInputSource
+        settingsLock.unlock()
+        guard mode == .camera else { return }
+
+        captureQueue.async { [weak self] in
+            guard let self else { return }
+            self.stopMediaPipelineOnCaptureQueue()
+            self.resetTrackingCachesOnCaptureQueue()
             self.configureCaptureSession(deviceId: camId)
             if !self.captureSession.isRunning {
                 self.captureSession.startRunning()
@@ -247,8 +595,14 @@ public final class HolisticTracker: NSObject, ObservableObject, @unchecked Senda
             if self.captureSession.isRunning {
                 self.captureSession.stopRunning()
             }
-            self.smoother.reset()
+            self.stopMediaPipelineOnCaptureQueue()
+            self.resetTrackingCachesOnCaptureQueue()
             DispatchQueue.main.async {
+                if self.inputSource != .camera {
+                    self.inputSource = .camera
+                    self.mediaFileName = nil
+                    self.mediaPreviewImage = nil
+                }
                 self.latestFrame = TrackedFrame()
                 self.stats = TrackerStats()
             }
@@ -350,8 +704,18 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        settingsLock.lock()
+        let mode = _activeInputSource
+        settingsLock.unlock()
+        guard mode == .camera,
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let nowSec = pts.isValid && !pts.seconds.isNaN ? pts.seconds : CACurrentMediaTime()
+        processFrameBuffer(pixelBuffer, timestampSec: nowSec)
+    }
+
+    private func processFrameBuffer(_ pixelBuffer: CVPixelBuffer, timestampSec nowSec: Double) {
         processLock.lock()
         if isProcessing {
             processLock.unlock()
@@ -367,13 +731,17 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         settingsLock.lock()
+        let paused = _isModalPaused
         let s = currentSettings
         let baseline = currentBaseline
         settingsLock.unlock()
 
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let nowSec = pts.isValid && !pts.seconds.isNaN ? pts.seconds : CACurrentMediaTime()
+        if paused { return }
+
         let wallNow = CACurrentMediaTime()
+        let bufW = max(1, CVPixelBufferGetWidth(pixelBuffer))
+        let bufH = max(1, CVPixelBufferGetHeight(pixelBuffer))
+        let frameAspect = Float(bufW) / Float(bufH)
 
         // Run Hand, Face, and Pose detections concurrently across CPU/Neural Engine cores
         let group = DispatchGroup()
@@ -415,13 +783,83 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         var oscMessages: [OSCMessage] = []
         var frame = TrackedFrame()
+        frame.frameAspect = frameAspect
+        frame.isMirrored = s.mirror
         var presentL = false
         var presentR = false
         var gestureL: String? = nil
         var gestureR: String? = nil
         var expressionSummary = "—"
 
-        // ── 1. HANDS (With Confidence Gate, Anatomical Bone Sanitizer & Anti-Flicker Grace Hold) ──
+        // ── 1. POSE FIRST (33 landmarks + fresh visibility mask so Hands & IK know exact live shoulder/elbow state!) ──
+        let poseObservations = s.trackPose ? (poseRequest.results ?? []) : []
+        if let poseObs = poseObservations.first,
+           let pts = try? poseObs.recognizedPoints(.all) {
+            let (rawPose, validMask, freshMask) = Self.extract33PoseLandmarks(
+                from: pts,
+                includeFacePoints: !s.trackFace,
+                lastValidJoints: &lastValidPoseJoints,
+                timestampSec: nowSec
+            )
+            let smoothedPose = smoother.smooth(prefix: "P", landmarks: rawPose, timestampSec: nowSec, maxJump: 0.14)
+            let mappedPose = smoothedPose.map { Self.mapCoord($0, settings: s) }
+
+            let resolvedPose: [Landmark?] = zip(smoothedPose, validMask).map { lm, valid in valid ? lm : nil }
+            frame.poseLandmarks = resolvedPose
+            frame.poseJointFresh = freshMask
+            lastValidPoseFrame = resolvedPose
+            lastValidPoseFreshMask = freshMask
+            lastValidPoseTimestamp = nowSec
+
+            // Record live isotropic body proportions whenever shoulders (and optional elbows/wrists) are freshly visible
+            if freshMask.count > 16, freshMask[11], freshMask[12],
+               let ls = resolvedPose[11], let rs = resolvedPose[12] {
+                let shSpan = hypot((rs.x - ls.x) * frameAspect, rs.y - ls.y)
+                if shSpan > 0.08 {
+                    var uSamples: [Float] = []
+                    var fSamples: [Float] = []
+                    if freshMask[13], let le = resolvedPose[13] {
+                        uSamples.append(hypot((le.x - ls.x) * frameAspect, le.y - ls.y))
+                        if freshMask[15], let lw = resolvedPose[15] {
+                            fSamples.append(hypot((lw.x - le.x) * frameAspect, lw.y - le.y))
+                        }
+                    }
+                    if freshMask[14], let re = resolvedPose[14] {
+                        uSamples.append(hypot((re.x - rs.x) * frameAspect, re.y - rs.y))
+                        if freshMask[16], let rw = resolvedPose[16] {
+                            fSamples.append(hypot((rw.x - re.x) * frameAspect, rw.y - re.y))
+                        }
+                    }
+                    let uMax = uSamples.max()
+                    let fMax = fSamples.max()
+                    settingsLock.lock()
+                    latestBodyProportions = (shoulderSpan: shSpan, upperArmLen: uMax, forearmLen: fMax)
+                    settingsLock.unlock()
+                }
+            }
+
+            if shouldSend {
+                let base = "/pose"
+                if s.poseSendLandmarks { Self.pushPerLandmark(&oscMessages, base: base, mapped: mappedPose) }
+                if s.poseSendBundled { Self.pushBundled(&oscMessages, base: base, mapped: mappedPose) }
+                if s.poseSendAxisGrouped { Self.pushAxisGrouped(&oscMessages, base: base, mapped: mappedPose) }
+            }
+        } else if s.trackPose, !lastValidPoseFrame.isEmpty {
+            if (nowSec - lastValidPoseTimestamp) <= 2.2 {
+                frame.poseLandmarks = lastValidPoseFrame
+                frame.poseJointFresh = Array(repeating: false, count: lastValidPoseFrame.count)
+            } else {
+                // Reset stale pose cache after 2.2s without tracking data
+                lastValidPoseFrame.removeAll()
+                lastValidPoseFreshMask.removeAll()
+                lastValidPoseJoints.removeAll()
+            }
+        }
+        if shouldSend && s.trackPose {
+            oscMessages.append(OSCMessage(address: "/pose/present", args: [.float(poseObservations.isEmpty ? 0 : 1)]))
+        }
+
+        // ── 2. HANDS (Skeleton-Anchored Left/Right Identity + Confidence Gate & Hold) ──
         let handObservations = s.trackHands ? (handRequest.results ?? []) : []
 
         struct CandidateHand {
@@ -436,8 +874,8 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             guard let recognized = try? obs.recognizedPoints(.all),
                   let wristPt = recognized[.wrist],
                   wristPt.confidence >= 0.24,
-                  wristPt.location.x > 0.008, wristPt.location.x < 0.992,
-                  wristPt.location.y > 0.005, wristPt.location.y < 0.995 else { continue }
+                  wristPt.location.x > 0.004, wristPt.location.x < 0.996,
+                  wristPt.location.y > 0.004, wristPt.location.y < 0.996 else { continue }
 
             let wx = Float(wristPt.location.x)
             let wy = Float(1.0 - wristPt.location.y)
@@ -447,13 +885,13 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             var confSum: Float = 0
             for jName in Self.handJointOrder {
                 if let p = recognized[jName],
-                   p.confidence >= 0.26,
-                   p.location.x > 0.005, p.location.x < 0.995,
+                   p.confidence >= 0.24,
+                   p.location.x > 0.003, p.location.x < 0.997,
                    p.location.y > 0.002, p.location.y < 0.998 {
                     let jx = Float(p.location.x)
                     let jy = Float(1.0 - p.location.y)
                     let distFromWrist = hypot(jx - wx, jy - wy)
-                    if distFromWrist <= 0.42 {
+                    if distFromWrist <= 0.45 {
                         validJointCount += 1
                         confSum += Float(p.confidence)
                     }
@@ -468,7 +906,7 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
                 let dL = hypot(wx - ls.x, wy - ls.y)
                 let dR = hypot(wx - rs.x, wy - rs.y)
                 let minShoulderDist = min(dL, dR)
-                if minShoulderDist > 0.74 { continue }
+                if minShoulderDist > 0.78 { continue }
             }
 
             let screenX = s.mirror ? (1.0 - wx) : wx
@@ -486,7 +924,35 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         candidateHands.sort { $0.screenX < $1.screenX }
 
         for (handIdx, item) in candidateHands.enumerated() {
-            let anatomicalLabel = (item.obs.chirality == .left) ? "L" : "R"
+            let anatomicalLabel: String = {
+                // Anchor single-hand identity to fresh body-pose wrists & shoulders so half-body poses never swap L/R!
+                if candidateHands.count == 1 {
+                    let wx = item.wrist.x
+                    let wy = item.wrist.y
+                    let freshLW = (lastValidPoseJoints[15].map { (nowSec - $0.timestamp) <= 0.25 ? $0.landmark : nil }) ?? nil
+                    let freshRW = (lastValidPoseJoints[16].map { (nowSec - $0.timestamp) <= 0.25 ? $0.landmark : nil }) ?? nil
+                    if let lw = freshLW, let rw = freshRW {
+                        let dL = hypot(wx - lw.x, wy - lw.y)
+                        let dR = hypot(wx - rw.x, wy - rw.y)
+                        if dL < 0.14 && dL < dR * 0.65 { return "L" }
+                        if dR < 0.14 && dR < dL * 0.65 { return "R" }
+                    } else if let lw = freshLW, hypot(wx - lw.x, wy - lw.y) < 0.12 {
+                        return "L"
+                    } else if let rw = freshRW, hypot(wx - rw.x, wy - rw.y) < 0.12 {
+                        return "R"
+                    }
+                    if let ls = lastValidPoseJoints[11]?.landmark, let rs = lastValidPoseJoints[12]?.landmark {
+                        let span = abs(ls.x - rs.x)
+                        if span > 0.08 {
+                            let dLS = abs(wx - ls.x)
+                            let dRS = abs(wx - rs.x)
+                            if dLS + span * 0.28 < dRS { return "L" }
+                            if dRS + span * 0.28 < dLS { return "R" }
+                        }
+                    }
+                }
+                return (item.obs.chirality == .left) ? "L" : "R"
+            }()
             let finalLabel: String = {
                 if candidateHands.count == 2 {
                     return handIdx == 0 ? "L" : "R"
@@ -568,14 +1034,14 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             let fState = GestureClassifier.fingerState(smoothed)
             let curls = [fState.thumbCurl, fState.indexCurl, fState.middleCurl, fState.ringCurl, fState.pinkyCurl]
 
-            // Calculate wrist angle in screen space (mirror-adjusted)
-            let screenWristX = s.mirror ? (1.0 - smoothed[0].x) : smoothed[0].x
-            let screenMidX = s.mirror ? (1.0 - smoothed[9].x) : smoothed[9].x
+            // Calculate isotropic wrist angle in screen space (mirror-adjusted)
+            let screenWristX = (s.mirror ? (1.0 - smoothed[0].x) : smoothed[0].x) * frameAspect
+            let screenMidX = (s.mirror ? (1.0 - smoothed[9].x) : smoothed[9].x) * frameAspect
             let wristAngle = atan2(screenMidX - screenWristX, -(smoothed[9].y - smoothed[0].y))
 
-            // Dedicated thumb direction in screen space (Landmark 1/2 base to Landmark 4 tip)
-            let screenThumbBaseX = s.mirror ? (1.0 - smoothed[1].x) : smoothed[1].x
-            let screenThumbTipX = s.mirror ? (1.0 - smoothed[4].x) : smoothed[4].x
+            // Dedicated thumb direction in isotropic screen space (Landmark 1 base to Landmark 4 tip)
+            let screenThumbBaseX = (s.mirror ? (1.0 - smoothed[1].x) : smoothed[1].x) * frameAspect
+            let screenThumbTipX = (s.mirror ? (1.0 - smoothed[4].x) : smoothed[4].x) * frameAspect
             let thumbDx = screenThumbTipX - screenThumbBaseX
             let thumbDy = -(smoothed[4].y - smoothed[1].y)
             let rawThumbAngle = (hypot(thumbDx, thumbDy) > 1e-4) ? atan2(thumbDx, thumbDy) : wristAngle
@@ -622,14 +1088,30 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             }
         }
 
-        // Anti-flicker Grace Hold: if a hand drops out for 1-4 frames (<= 170ms), hold its last valid state
-        // so the puppet's arm never snaps back and forth to the resting pose!
+        // Last-known Hand Hold -> Smooth Glide Back to Rest -> Clean Reset:
+        // 0..2.0s: hold last tracked hand; 2.0..3.6s: glide smoothly back to neutral A-pose; >3.6s: reset.
         if s.trackHands {
             for label in ["L", "R"] {
                 let isPresent = (label == "L") ? presentL : presentR
-                if !isPresent, let cached = lastValidTrackedHand[label], (nowSec - cached.timestamp) <= 0.17 {
-                    frame.hands.append(cached.hand)
-                    if label == "L" { presentL = true } else { presentR = true }
+                if !isPresent, let cached = lastValidTrackedHand[label] {
+                    let absentSec = nowSec - cached.timestamp
+                    if absentSec <= 3.6 {
+                        var held = cached.hand
+                        held.isGhost = (absentSec > 0.35)
+                        if absentSec > 2.0 {
+                            let t = max(0.0, min(1.0, Float((absentSec - 2.0) / 1.6)))
+                            held.returnToRestBlend = t * t * (3.0 - 2.0 * t)
+                        } else {
+                            held.returnToRestBlend = 0.0
+                        }
+                        frame.hands.append(held)
+                        if absentSec <= 0.17 {
+                            if label == "L" { presentL = true } else { presentR = true }
+                        }
+                    } else {
+                        lastValidTrackedHand.removeValue(forKey: label)
+                        lastValidHandRaw.removeValue(forKey: label)
+                    }
                 }
             }
         }
@@ -637,33 +1119,6 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         if shouldSend && s.trackHands {
             oscMessages.append(OSCMessage(address: "/hand/L/present", args: [.float(presentL ? 1 : 0)]))
             oscMessages.append(OSCMessage(address: "/hand/R/present", args: [.float(presentR ? 1 : 0)]))
-        }
-
-        // ── 2. POSE (33 landmarks compatible with MediaPipe Pose indices) ───
-        // Suppress redundant body-pose face landmarks (indices 0..10) when dedicated Face Tracking is active!
-        let poseObservations = s.trackPose ? (poseRequest.results ?? []) : []
-        if let poseObs = poseObservations.first,
-           let pts = try? poseObs.recognizedPoints(.all) {
-            let (rawPose, validMask) = Self.extract33PoseLandmarks(
-                from: pts,
-                includeFacePoints: !s.trackFace,
-                lastValidJoints: &lastValidPoseJoints,
-                timestampSec: nowSec
-            )
-            let smoothedPose = smoother.smooth(prefix: "P", landmarks: rawPose, timestampSec: nowSec, maxJump: 0.14)
-            let mappedPose = smoothedPose.map { Self.mapCoord($0, settings: s) }
-
-            frame.poseLandmarks = zip(smoothedPose, validMask).map { lm, valid in valid ? lm : nil }
-
-            if shouldSend {
-                let base = "/pose"
-                if s.poseSendLandmarks { Self.pushPerLandmark(&oscMessages, base: base, mapped: mappedPose) }
-                if s.poseSendBundled { Self.pushBundled(&oscMessages, base: base, mapped: mappedPose) }
-                if s.poseSendAxisGrouped { Self.pushAxisGrouped(&oscMessages, base: base, mapped: mappedPose) }
-            }
-        }
-        if shouldSend && s.trackPose {
-            oscMessages.append(OSCMessage(address: "/pose/present", args: [.float(poseObservations.isEmpty ? 0 : 1)]))
         }
 
         // ── 3. FACE ─────────────────────────────────────────────────────────
@@ -676,7 +1131,8 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             let rawMeas = GestureClassifier.measureFace(
                 observation: faceObs,
                 landmarks: landmarks2D,
-                mirror: s.mirror
+                mirror: s.mirror,
+                aspectRatio: CGFloat(frameAspect)
             )
             settingsLock.lock()
             lastRawFace = rawMeas
@@ -698,10 +1154,18 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             var fm = evaluated.metrics
             fm.headX = smoother.filter(key: "FM_x", value: fm.headX, timestampSec: nowSec, maxJump: 0.20)
             fm.headY = smoother.filter(key: "FM_y", value: fm.headY, timestampSec: nowSec, maxJump: 0.20)
-            fm.headScale = smoother.filter(key: "FM_scale", value: fm.headScale, timestampSec: nowSec, maxJump: 0.18)
             fm.roll = smoother.filter(key: "FM_roll", value: fm.roll, timestampSec: nowSec, maxJump: 0.16)
             fm.yaw = smoother.filter(key: "FM_yaw", value: fm.yaw, timestampSec: nowSec, maxJump: 0.22)
             fm.pitch = smoother.filter(key: "FM_pitch", value: fm.pitch, timestampSec: nowSec, maxJump: 0.22)
+
+            // Lock depth scale steady during head/body turns so turning never grows or shrinks the character!
+            if abs(fm.yaw) <= 0.16 && abs(fm.pitch) <= 0.16 {
+                let sScale = smoother.filter(key: "FM_scale", value: fm.headScale, timestampSec: nowSec, maxJump: 0.08)
+                lastStableHeadScale = sScale
+                fm.headScale = sScale
+            } else {
+                fm.headScale = lastStableHeadScale
+            }
             fm.mouthOpen = smoother.filter(key: "FM_mouthOpen", value: fm.mouthOpen, timestampSec: nowSec, maxJump: 0.35)
             fm.mouthSmile = smoother.filter(key: "FM_smile", value: fm.mouthSmile, timestampSec: nowSec, maxJump: 0.30)
             fm.mouthPucker = smoother.filter(key: "FM_pucker", value: fm.mouthPucker, timestampSec: nowSec, maxJump: 0.30)
@@ -716,6 +1180,7 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             frame.faceMetrics = fm
             frame.faceKeyPoints = rawMeas.keyPoints
             frame.blendshapes = evaluated.blendshapes
+            lastValidFaceState = (metrics: fm, timestamp: nowSec)
 
             if s.faceTier != .off {
                 let rawFace = Self.extractFaceLandmarks(from: landmarks2D, boundingBox: bbox, tier: s.faceTier)
@@ -739,6 +1204,49 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
                     oscMessages.append(OSCMessage(address: "/face/blendshape/\(item.name)", args: [.float(item.score)]))
                 }
                 oscMessages.append(OSCMessage(address: "/face/blendshapes", floats: scores))
+            }
+        } else if s.trackFace, var cachedFace = lastValidFaceState {
+            let absentSec = nowSec - cachedFace.timestamp
+            if absentSec > 4.5 {
+                // Fully settled back at neutral; clear stale face cache
+                lastValidFaceState = nil
+                lastStableHeadScale = 1.0
+            } else {
+                if absentSec > 0.35 {
+                    cachedFace.metrics.eyeBlinkL *= 0.85
+                    cachedFace.metrics.eyeBlinkR *= 0.85
+                    cachedFace.metrics.mouthOpen *= 0.85
+                    if cachedFace.metrics.eyeBlinkL < 0.04 { cachedFace.metrics.eyeBlinkL = 0.0 }
+                    if cachedFace.metrics.eyeBlinkR < 0.04 { cachedFace.metrics.eyeBlinkR = 0.0 }
+                    if cachedFace.metrics.mouthOpen < 0.04 {
+                        cachedFace.metrics.mouthOpen = 0.0
+                        if cachedFace.metrics.mouthSmile < 0.25 && cachedFace.metrics.mouthPucker < 0.25 {
+                            cachedFace.metrics.viseme = .neutral
+                        }
+                    }
+                }
+                if absentSec > 2.0 {
+                    // Gently glide head pose & expressions back toward calibrated neutral instead of snapping
+                    let decay: Float = 0.90
+                    cachedFace.metrics.headX *= decay
+                    cachedFace.metrics.headY *= decay
+                    cachedFace.metrics.roll *= decay
+                    cachedFace.metrics.yaw *= decay
+                    cachedFace.metrics.pitch *= decay
+                    cachedFace.metrics.mouthSmile *= decay
+                    cachedFace.metrics.mouthPucker *= decay
+                    cachedFace.metrics.browRaise *= decay
+                    cachedFace.metrics.headScale = 1.0 + (cachedFace.metrics.headScale - 1.0) * decay
+                    lastStableHeadScale = cachedFace.metrics.headScale
+                    if abs(cachedFace.metrics.mouthSmile) < 0.04 { cachedFace.metrics.mouthSmile = 0.0 }
+                    if abs(cachedFace.metrics.mouthPucker) < 0.04 { cachedFace.metrics.mouthPucker = 0.0 }
+                    if cachedFace.metrics.mouthOpen < 0.04 && cachedFace.metrics.mouthSmile < 0.25 && cachedFace.metrics.mouthPucker < 0.25 {
+                        cachedFace.metrics.viseme = .neutral
+                    }
+                }
+                lastValidFaceState = cachedFace
+                frame.faceMetrics = cachedFace.metrics
+                expressionSummary = cachedFace.metrics.summaryLabel
             }
         }
         if shouldSend && s.trackFace {
@@ -782,7 +1290,7 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         let exprSummaryCopy = expressionSummary
 
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isModalPaused else { return }
             self.latestFrame = frame
             if let st = updatedStats {
                 self.stats = st
@@ -852,16 +1360,16 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         includeFacePoints: Bool,
         lastValidJoints: inout [Int: (landmark: Landmark, timestamp: Double)],
         timestampSec: Double
-    ) -> ([Landmark], [Bool]) {
-        func get(_ name: VNHumanBodyPoseObservation.JointName, minConf: Float = 0.40) -> Landmark? {
+    ) -> ([Landmark], [Bool], [Bool]) {
+        func get(_ name: VNHumanBodyPoseObservation.JointName, minConf: Float = 0.32) -> Landmark? {
             guard let p = pts[name],
                   p.confidence >= minConf,
-                  p.location.x > 0.02, p.location.x < 0.98,
-                  p.location.y > 0.03, p.location.y < 0.97 else { return nil }
+                  p.location.x > 0.003, p.location.x < 0.997,
+                  p.location.y > 0.003, p.location.y < 0.997 else { return nil }
             return Landmark(x: Float(p.location.x), y: Float(1.0 - p.location.y), z: 0)
         }
 
-        func validBone(_ a: Landmark?, _ b: Landmark?, minLen: Float = 0.04, maxLen: Float = 0.44) -> Landmark? {
+        func validBone(_ a: Landmark?, _ b: Landmark?, minLen: Float = 0.035, maxLen: Float = 0.56) -> Landmark? {
             guard let parent = a, let child = b else { return nil }
             let d = hypot(child.x - parent.x, child.y - parent.y)
             guard d >= minLen && d <= maxLen else { return nil }
@@ -874,19 +1382,19 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
         let lEar = includeFacePoints ? get(.leftEar) : nil
         let rEar = includeFacePoints ? get(.rightEar) : nil
 
-        let lShoulder = get(.leftShoulder, minConf: 0.38)
-        let rShoulder = get(.rightShoulder, minConf: 0.38)
-        let lElbow = validBone(lShoulder, get(.leftElbow, minConf: 0.40), minLen: 0.04, maxLen: 0.42)
-        let rElbow = validBone(rShoulder, get(.rightElbow, minConf: 0.40), minLen: 0.04, maxLen: 0.42)
-        let lWrist = validBone(lElbow, get(.leftWrist, minConf: 0.40), minLen: 0.03, maxLen: 0.42)
-        let rWrist = validBone(rElbow, get(.rightWrist, minConf: 0.40), minLen: 0.03, maxLen: 0.42)
+        let lShoulder = get(.leftShoulder, minConf: 0.34)
+        let rShoulder = get(.rightShoulder, minConf: 0.34)
+        let lElbow = validBone(lShoulder, get(.leftElbow, minConf: 0.30), minLen: 0.035, maxLen: 0.54)
+        let rElbow = validBone(rShoulder, get(.rightElbow, minConf: 0.30), minLen: 0.035, maxLen: 0.54)
+        let lWrist = validBone(lElbow, get(.leftWrist, minConf: 0.30), minLen: 0.025, maxLen: 0.54)
+        let rWrist = validBone(rElbow, get(.rightWrist, minConf: 0.30), minLen: 0.025, maxLen: 0.54)
 
-        let lHip = get(.leftHip, minConf: 0.40)
-        let rHip = get(.rightHip, minConf: 0.40)
-        let lKnee = validBone(lHip, get(.leftKnee, minConf: 0.40), minLen: 0.05, maxLen: 0.48)
-        let rKnee = validBone(rHip, get(.rightKnee, minConf: 0.40), minLen: 0.05, maxLen: 0.48)
-        let lAnkle = validBone(lKnee, get(.leftAnkle, minConf: 0.40), minLen: 0.05, maxLen: 0.48)
-        let rAnkle = validBone(rKnee, get(.rightAnkle, minConf: 0.40), minLen: 0.05, maxLen: 0.48)
+        let lHip = get(.leftHip, minConf: 0.36)
+        let rHip = get(.rightHip, minConf: 0.36)
+        let lKnee = validBone(lHip, get(.leftKnee, minConf: 0.36), minLen: 0.04, maxLen: 0.54)
+        let rKnee = validBone(rHip, get(.rightKnee, minConf: 0.36), minLen: 0.04, maxLen: 0.54)
+        let lAnkle = validBone(lKnee, get(.leftAnkle, minConf: 0.36), minLen: 0.04, maxLen: 0.54)
+        let rAnkle = validBone(rKnee, get(.rightAnkle, minConf: 0.36), minLen: 0.04, maxLen: 0.54)
 
         var rawSlots: [Landmark?] = [
             nose, lEye, lEye, lEye, rEye, rEye, rEye,
@@ -897,18 +1405,23 @@ extension HolisticTracker: AVCaptureVideoDataOutputSampleBufferDelegate {
             lAnkle, rAnkle, lAnkle, rAnkle
         ]
 
-        // Apply 170ms anti-flicker grace hold on body joints (11..32)
+        var freshMask = rawSlots.map { $0 != nil }
+
+        // Hold last valid body joint positions when occluded so joints never snap to (0.5, 0.5),
+        // while keeping `freshMask` accurate (within 220ms) so arm FK/IK knows whether an elbow is live on-screen!
         for idx in 11..<rawSlots.count {
             if let valid = rawSlots[idx] {
                 lastValidJoints[idx] = (valid, timestampSec)
-            } else if let cached = lastValidJoints[idx], (timestampSec - cached.timestamp) <= 0.17 {
+                freshMask[idx] = true
+            } else if let cached = lastValidJoints[idx] {
                 rawSlots[idx] = cached.landmark
+                freshMask[idx] = (timestampSec - cached.timestamp) <= 0.22
             }
         }
 
         let landmarks = rawSlots.map { $0 ?? Landmark(x: 0.5, y: 0.5, z: 0) }
         let mask = rawSlots.map { $0 != nil }
-        return (landmarks, mask)
+        return (landmarks, mask, freshMask)
     }
 
     private static func extractFaceLandmarks(

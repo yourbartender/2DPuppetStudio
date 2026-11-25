@@ -9,6 +9,7 @@ let udpReadyPromise = null;
 
 function createWindow() {
   win = new BrowserWindow({
+    title: "Puppet Studio",
     width: 1400,
     height: 900,
     minWidth: 1100,

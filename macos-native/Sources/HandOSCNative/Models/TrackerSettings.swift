@@ -28,6 +28,30 @@ public enum AppViewMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+public enum TrackerInputSource: String, CaseIterable, Identifiable, Codable, Sendable {
+    case camera = "camera"
+    case videoFile = "video"
+    case stillImage = "image"
+
+    public var id: String { rawValue }
+
+    public var label: String {
+        switch self {
+        case .camera: return "Live Camera"
+        case .videoFile: return "Video File"
+        case .stillImage: return "Still Photo"
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .camera: return "video.fill"
+        case .videoFile: return "film"
+        case .stillImage: return "photo.fill"
+        }
+    }
+}
+
 public enum MappingMode: String, CaseIterable, Identifiable, Codable, Sendable {
     case centeredAspect = "centered_aspect"
     case normalized = "normalized"
@@ -158,6 +182,11 @@ public struct FaceCalibrationBaseline: Sendable, Codable, Equatable {
     public var neutralEyeAspect: Float = 0.25
     public var neutralEyeAspectL: Float = 0.25
     public var neutralEyeAspectR: Float = 0.25
+    public var neutralVerticalSkull: Float? = nil
+    public var calibratedShoulderSpan: Float? = nil
+    public var calibratedUpperArmLen: Float? = nil
+    public var calibratedForearmLen: Float? = nil
+    public var isBodyCalibrated: Bool? = nil
     public var isCalibrated: Bool = false
 
     public init() {}
@@ -252,6 +281,10 @@ public struct TrackedHand: Sendable {
     public let palmFacingSign: Float
     /// Per-finger curl ratios [Thumb, Index, Middle, Ring, Pinky] (0.0 = extended, 1.0 = curled into fist)
     public let fingerCurls: [Float]
+    /// True when hand tracking is lost and this hand is only held/gliding for the puppet (hidden from camera preview)
+    public var isGhost: Bool = false
+    /// 0.0 = held at last tracked position, 0.0 -> 1.0 = smoothly gliding back to resting A-pose
+    public var returnToRestBlend: Float = 0.0
 
     public init(
         label: String,
@@ -265,7 +298,9 @@ public struct TrackedHand: Sendable {
         thumbSpread: Float = 0,
         scale: Float,
         palmFacingSign: Float,
-        fingerCurls: [Float]
+        fingerCurls: [Float],
+        isGhost: Bool = false,
+        returnToRestBlend: Float = 0.0
     ) {
         self.label = label
         self.rawLandmarks = rawLandmarks
@@ -279,6 +314,8 @@ public struct TrackedHand: Sendable {
         self.scale = scale
         self.palmFacingSign = palmFacingSign
         self.fingerCurls = fingerCurls
+        self.isGhost = isGhost
+        self.returnToRestBlend = returnToRestBlend
     }
 }
 
@@ -286,6 +323,12 @@ public struct TrackedFrame: Sendable {
     public var hands: [TrackedHand] = []
     /// 33 pose landmarks in top-left normalized drawing coordinates (nil entries where untracked)
     public var poseLandmarks: [Landmark?] = []
+    /// 33 flags indicating whether each pose joint is actively visible right now (vs held from earlier)
+    public var poseJointFresh: [Bool] = []
+    /// Source pixel-buffer width / height aspect ratio (e.g. 1.7778 for 16:9) for isotropic angle calculation
+    public var frameAspect: Float = 16.0 / 9.0
+    /// Whether screen X coordinates should be mirrored for puppet/preview display
+    public var isMirrored: Bool = true
     /// Face landmarks in top-left normalized drawing coordinates
     public var faceLandmarks: [Landmark] = []
     /// Named facial landmarks in top-left image space for direct puppet mapping

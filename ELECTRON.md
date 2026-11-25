@@ -1,6 +1,6 @@
-# HandOSC — MediaPipe Hands → OSC (macOS)
+# Puppet Studio (Electron) — MediaPipe Hand, Body & Face → OSC
 
-A desktop app that uses Google MediaPipe Hand Landmarker to track your hands through your webcam and broadcasts OSC messages over UDP to creative tools like Max/MSP, Ableton Live, TouchDesigner, VCV Rack, etc.
+A cross-platform desktop app that uses Google MediaPipe Landmarkers to track hands, body pose, and face expressions through your webcam and broadcasts OSC messages over UDP to creative tools like Max/MSP, Ableton Live, TouchDesigner, VCV Rack, etc.
 
 Built on TanStack Start (Vite + React) for the UI and Electron for native camera access + real UDP sockets.
 

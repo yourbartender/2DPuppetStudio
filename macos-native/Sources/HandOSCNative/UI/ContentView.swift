@@ -3,6 +3,7 @@ import SwiftUI
 public struct ContentView: View {
     @StateObject private var tracker = HolisticTracker()
     @StateObject private var puppet = PuppetController()
+    @StateObject private var ndiSender = NDISenderService()
     @State private var viewMode: AppViewMode = .split
     @State private var showFullStageCamera: Bool = true
     @State private var cleanStageFeed: Bool = false
@@ -39,6 +40,7 @@ public struct ContentView: View {
                 PuppetStudioView(
                     puppet: puppet,
                     tracker: tracker,
+                    ndiSender: ndiSender,
                     onOpenFullStage: { viewMode = .fullStage }
                 )
                 .padding(18)
@@ -53,14 +55,28 @@ public struct ContentView: View {
                                     session: tracker.captureSession,
                                     frame: tracker.latestFrame,
                                     mirror: tracker.settings.mirror,
-                                    isRunning: tracker.isRunning
+                                    isRunning: tracker.isRunning,
+                                    inputSource: tracker.inputSource,
+                                    mediaImage: tracker.mediaPreviewImage,
+                                    mediaFileName: tracker.mediaFileName,
+                                    isMediaPlaying: tracker.isMediaPlaying,
+                                    calibrationCountdown: tracker.calibrationCountdown,
+                                    onSelectLiveCamera: { tracker.switchToLiveCamera() },
+                                    onLoadVideo: { tracker.promptAndLoadVideoFile() },
+                                    onLoadPhoto: { tracker.promptAndLoadStillImage() },
+                                    onTogglePlayPause: { tracker.toggleMediaPlayback() }
                                 )
                                 PuppetStageView(
                                     puppet: puppet,
                                     frame: tracker.latestFrame,
                                     isCalibrated: tracker.calibrationBaseline.isCalibrated,
                                     onCalibrate: { tracker.calibrateNeutralFace() },
-                                    onToggleFullStage: { viewMode = .fullStage }
+                                    allowPartEditing: false,
+                                    onToggleFullStage: { viewMode = .fullStage },
+                                    calibrationBaseline: tracker.calibrationBaseline,
+                                    calibrationCountdown: tracker.calibrationCountdown,
+                                    onCountdownCalibrate: { tracker.startCountdownCalibration(seconds: 3) },
+                                    ndiSender: ndiSender
                                 )
                             }
                         } else {
@@ -68,7 +84,16 @@ public struct ContentView: View {
                                 session: tracker.captureSession,
                                 frame: tracker.latestFrame,
                                 mirror: tracker.settings.mirror,
-                                isRunning: tracker.isRunning
+                                isRunning: tracker.isRunning,
+                                inputSource: tracker.inputSource,
+                                mediaImage: tracker.mediaPreviewImage,
+                                mediaFileName: tracker.mediaFileName,
+                                isMediaPlaying: tracker.isMediaPlaying,
+                                calibrationCountdown: tracker.calibrationCountdown,
+                                onSelectLiveCamera: { tracker.switchToLiveCamera() },
+                                onLoadVideo: { tracker.promptAndLoadVideoFile() },
+                                onLoadPhoto: { tracker.promptAndLoadStillImage() },
+                                onTogglePlayPause: { tracker.toggleMediaPlayback() }
                             )
                         }
 
@@ -130,6 +155,12 @@ public struct ContentView: View {
         }
         .background(Color(red: 0.09, green: 0.11, blue: 0.14))
         .preferredColorScheme(.dark)
+        .onReceive(NotificationCenter.default.publisher(for: .newPuppetRequested)) { _ in
+            puppet.showNewPuppetModal = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .importPSDRequested)) { _ in
+            puppet.showPSDImporter = true
+        }
         .onReceive(NotificationCenter.default.publisher(for: .saveCharacterPackageRequested)) { _ in
             puppet.exportCharacterPackage()
         }
@@ -139,6 +170,39 @@ public struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .importCharacterRequested)) { _ in
             puppet.importRigFromFile()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .undoRequested)) { _ in
+            if let tv = NSApp.keyWindow?.firstResponder as? NSTextView, tv.undoManager?.canUndo == true {
+                tv.undoManager?.undo()
+            } else {
+                puppet.undo()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .redoRequested)) { _ in
+            if let tv = NSApp.keyWindow?.firstResponder as? NSTextView, tv.undoManager?.canRedo == true {
+                tv.undoManager?.redo()
+            } else {
+                puppet.redo()
+            }
+        }
+        .onChange(of: puppet.showPSDImporter) { syncModalTrackingPause() }
+        .onChange(of: puppet.showSheetImporter) { syncModalTrackingPause() }
+        .onChange(of: puppet.showNewPuppetModal) { syncModalTrackingPause() }
+        .sheet(isPresented: $puppet.showSheetImporter, onDismiss: { syncModalTrackingPause() }) {
+            PuppetSheetImporterModal(puppet: puppet)
+                .onAppear { tracker.isModalPaused = true }
+        }
+        .sheet(isPresented: $puppet.showPSDImporter, onDismiss: { syncModalTrackingPause() }) {
+            PuppetPSDImporterModal(puppet: puppet)
+                .onAppear { tracker.isModalPaused = true }
+        }
+        .sheet(isPresented: $puppet.showNewPuppetModal, onDismiss: { syncModalTrackingPause() }) {
+            NewPuppetModal(puppet: puppet)
+                .onAppear { tracker.isModalPaused = true }
+        }
+    }
+
+    private func syncModalTrackingPause() {
+        tracker.isModalPaused = puppet.showPSDImporter || puppet.showSheetImporter || puppet.showNewPuppetModal
     }
 
     private var formattedGestures: String {
@@ -212,10 +276,15 @@ public struct ContentView: View {
                 onCalibrate: { tracker.calibrateNeutralFace() },
                 fillsWindow: true,
                 showOverlayControls: !cleanStageFeed,
+                allowPartEditing: false,
                 onToggleFullStage: {
                     cleanStageFeed = false
                     viewMode = .puppetStudio
-                }
+                },
+                calibrationBaseline: tracker.calibrationBaseline,
+                calibrationCountdown: tracker.calibrationCountdown,
+                onCountdownCalibrate: { tracker.startCountdownCalibration(seconds: 3) },
+                ndiSender: ndiSender
             )
 
             // Bottom floating control & PiP camera bar
@@ -226,7 +295,16 @@ public struct ContentView: View {
                             session: tracker.captureSession,
                             frame: tracker.latestFrame,
                             mirror: tracker.settings.mirror,
-                            isRunning: tracker.isRunning
+                            isRunning: tracker.isRunning,
+                            inputSource: tracker.inputSource,
+                            mediaImage: tracker.mediaPreviewImage,
+                            mediaFileName: tracker.mediaFileName,
+                            isMediaPlaying: tracker.isMediaPlaying,
+                            calibrationCountdown: tracker.calibrationCountdown,
+                            onSelectLiveCamera: { tracker.switchToLiveCamera() },
+                            onLoadVideo: { tracker.promptAndLoadVideoFile() },
+                            onLoadPhoto: { tracker.promptAndLoadStillImage() },
+                            onTogglePlayPause: { tracker.toggleMediaPlayback() }
                         )
                         .frame(width: 260)
                         .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 4)
@@ -330,9 +408,9 @@ public struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("HandOSC Native & 2D Puppet Studio")
-                        .font(.system(size: 15.5, weight: .semibold))
-                    Text("Apple Vision Neural Engine → 2D Puppet & OSC")
+                    Text("Puppet Studio")
+                        .font(.system(size: 15.5, weight: .bold))
+                    Text("2D Animation Rigging, Vision AI & OSC")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -368,7 +446,35 @@ public struct ContentView: View {
 
             Spacer()
 
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                HStack(spacing: 4) {
+                    Button {
+                        puppet.undo()
+                    } label: {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .frame(width: 24, height: 22)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!puppet.canUndo)
+                    .help("Undo (⌘Z)")
+
+                    Button {
+                        puppet.redo()
+                    } label: {
+                        Image(systemName: "arrow.uturn.forward")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .frame(width: 24, height: 22)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!puppet.canRedo)
+                    .help("Redo (⇧⌘Z)")
+                }
+
+                ndiControlPill
+
                 HStack(spacing: 6) {
                     Image(systemName: "dot.radiowaves.left.and.right")
                         .font(.system(size: 11))
@@ -402,6 +508,52 @@ public struct ContentView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 11)
         .background(Color.black.opacity(0.25))
+    }
+
+    private var ndiControlPill: some View {
+        let isLive = ndiSender.isEnabled
+        let fg: Color = isLive ? .green : (ndiSender.isRuntimeAvailable ? .secondary : .gray.opacity(0.5))
+        return HStack(spacing: 4) {
+            Button {
+                ndiSender.isEnabled.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: isLive ? "antenna.radiowaves.left.and.right" : "video.badge.waveform")
+                        .font(.system(size: 11))
+                    Text(isLive ? "NDI Live" : "NDI Out")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 6)
+                .padding(.vertical, 5)
+            }
+            .buttonStyle(.plain)
+            .disabled(!ndiSender.isRuntimeAvailable)
+
+            Menu {
+                ForEach(NDIBackgroundMode.allCases, id: \.rawValue) { mode in
+                    Button {
+                        ndiSender.backgroundMode = mode
+                    } label: {
+                        Text(ndiSender.backgroundMode == mode ? "✓ \(mode.label)" : mode.label)
+                    }
+                }
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .padding(.trailing, 8)
+                    .padding(.vertical, 5)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .background(isLive ? Color.green.opacity(0.22) : Color.white.opacity(0.06))
+        .foregroundStyle(fg)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(isLive ? Color.green.opacity(0.55) : Color.white.opacity(0.12), lineWidth: 1))
+        .help(ndiSender.isRuntimeAvailable
+              ? "Stream character via NDI (\(ndiSender.backgroundMode.label))"
+              : "NDI Runtime (/usr/local/lib/libndi.dylib) not detected")
     }
 
     // MARK: - Sidebar Sections
@@ -631,7 +783,65 @@ public struct ContentView: View {
     }
 
     private var cameraSection: some View {
-        SectionCard(title: "Camera", systemImage: "video") {
+        SectionCard(title: "Camera & Reference Media", systemImage: "video") {
+            VStack(alignment: .leading, spacing: 4) {
+                FieldLabel("INPUT SOURCE")
+                HStack(spacing: 6) {
+                    Button {
+                        tracker.switchToLiveCamera()
+                    } label: {
+                        Label("Camera", systemImage: "video.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tracker.inputSource == .camera ? .teal : .gray.opacity(0.4))
+                    .controlSize(.small)
+
+                    Button {
+                        tracker.promptAndLoadVideoFile()
+                    } label: {
+                        Label("Video…", systemImage: "film")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tracker.inputSource == .videoFile ? .teal : .gray.opacity(0.4))
+                    .controlSize(.small)
+
+                    Button {
+                        tracker.promptAndLoadStillImage()
+                    } label: {
+                        Label("Photo…", systemImage: "photo")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tracker.inputSource == .stillImage ? .teal : .gray.opacity(0.4))
+                    .controlSize(.small)
+                }
+            }
+
+            if tracker.inputSource != .camera, let name = tracker.mediaFileName {
+                HStack(spacing: 6) {
+                    Image(systemName: tracker.inputSource == .videoFile ? "film" : "photo")
+                        .foregroundStyle(.teal)
+                    Text(name)
+                        .font(.system(size: 11, design: .monospaced))
+                        .lineLimit(1)
+                    Spacer()
+                    if tracker.inputSource == .videoFile {
+                        Button {
+                            tracker.toggleMediaPlayback()
+                        } label: {
+                            Image(systemName: tracker.isMediaPlaying ? "pause.fill" : "play.fill")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
+            }
+
             VStack(alignment: .leading, spacing: 4) {
                 FieldLabel("DEVICE")
                 Picker("", selection: $tracker.selectedCameraId) {

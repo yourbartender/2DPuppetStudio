@@ -18,6 +18,10 @@ public struct PuppetPartReplaceMenu: View {
         self.font = font
     }
 
+    private var copyableSlots: [PuppetPartSlot] {
+        PuppetPartSlot.allCases.filter { $0 != slot && puppet.partImages[$0] != nil }
+    }
+
     public var body: some View {
         Menu {
             Button {
@@ -27,21 +31,52 @@ public struct PuppetPartReplaceMenu: View {
             }
 
             Button {
-                let panel = NSOpenPanel()
-                panel.title = "Import Graphic for \(slot.title)"
-                panel.allowedContentTypes = [.png, .jpeg, .tiff, UTType(filenameExtension: "webp")].compactMap { $0 }
-                panel.allowsMultipleSelection = false
-                if panel.runModal() == .OK, let url = panel.url {
-                    puppet.loadImage(from: url, for: slot)
-                }
+                puppet.showPSDImporter = true
+            } label: {
+                Label("From Layered PSD…", systemImage: "photo.stack")
+            }
+
+            Button {
+                openFinderImagePanel()
             } label: {
                 Label("From Finder (PNG/JPG)…", systemImage: "folder")
             }
+
+            copyFromPartSection
         } label: {
             Label(title, systemImage: "photo.badge.plus")
                 .font(font)
         }
-        .help("Replace graphic from sprite sheet or Finder")
+        .help("Replace graphic from sprite sheet, PSD, Finder, or copy from another part")
+    }
+
+    @ViewBuilder
+    private var copyFromPartSection: some View {
+        let slots = copyableSlots
+        if !slots.isEmpty {
+            Divider()
+            Menu {
+                ForEach(slots, id: \.rawValue) { srcSlot in
+                    Button {
+                        puppet.copyPartGraphic(from: srcSlot, to: slot)
+                    } label: {
+                        Label("\(srcSlot.title)  —  \(srcSlot.category.shortLabel)", systemImage: srcSlot.systemIcon)
+                    }
+                }
+            } label: {
+                Label("Copy From Another Part…", systemImage: "doc.on.doc")
+            }
+        }
+    }
+
+    private func openFinderImagePanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Graphic for \(slot.title)"
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, UTType(filenameExtension: "webp")].compactMap { $0 }
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            puppet.loadImage(from: url, for: slot)
+        }
     }
 }
 
@@ -54,7 +89,12 @@ public struct PuppetStageView: View {
     public let isCalibrated: Bool
     public var fillsWindow: Bool = false
     public var showOverlayControls: Bool = true
+    public var allowPartEditing: Bool = true
     public var onToggleFullStage: (() -> Void)? = nil
+    public var calibrationBaseline: FaceCalibrationBaseline = FaceCalibrationBaseline()
+    public var calibrationCountdown: Int = 0
+    public var onCountdownCalibrate: (() -> Void)? = nil
+    public var ndiSender: NDISenderService? = nil
 
     @State private var zoomScale: CGFloat = 1.0
     @GestureState private var livePuppetDrag: CGSize = .zero
@@ -111,7 +151,12 @@ public struct PuppetStageView: View {
         onCalibrate: @escaping () -> Void,
         fillsWindow: Bool = false,
         showOverlayControls: Bool = true,
-        onToggleFullStage: (() -> Void)? = nil
+        allowPartEditing: Bool = true,
+        onToggleFullStage: (() -> Void)? = nil,
+        calibrationBaseline: FaceCalibrationBaseline = FaceCalibrationBaseline(),
+        calibrationCountdown: Int = 0,
+        onCountdownCalibrate: (() -> Void)? = nil,
+        ndiSender: NDISenderService? = nil
     ) {
         self.puppet = puppet
         self.frame = frame
@@ -119,7 +164,12 @@ public struct PuppetStageView: View {
         self.onCalibrate = onCalibrate
         self.fillsWindow = fillsWindow
         self.showOverlayControls = showOverlayControls
+        self.allowPartEditing = allowPartEditing
         self.onToggleFullStage = onToggleFullStage
+        self.calibrationBaseline = calibrationBaseline
+        self.calibrationCountdown = calibrationCountdown
+        self.onCountdownCalibrate = onCountdownCalibrate
+        self.ndiSender = ndiSender
     }
 
     public var body: some View {
@@ -129,7 +179,7 @@ public struct PuppetStageView: View {
             }
 
             GeometryReader { geo in
-                TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: puppet.showPSDImporter || puppet.showSheetImporter || puppet.showNewPuppetModal)) { timeline in
                     let resolved = activeFrameAndTime(now: timeline.date.timeIntervalSinceReferenceDate)
                     let layout = computeStageLayout(in: geo.size, frame: resolved.frame, time: resolved.time)
 
@@ -143,11 +193,37 @@ public struct PuppetStageView: View {
                             for part in layout.parts {
                                 part.drawAction(&context)
                             }
-                            if puppet.showPinsOnStage {
+                            if allowPartEditing && puppet.showPinsOnStage {
                                 for pinItem in layout.stagePins {
                                     drawStagePin(context: &context, at: pinItem.point, color: pinItem.color)
                                 }
                                 drawTrackedHandSkeletons(context: &context, chains: layout.trackedHandChains)
+                            }
+                        }
+                        .onChange(of: timeline.date) {
+                            guard let sender = ndiSender, sender.isEnabled else { return }
+                            let ndiSize = CGSize(width: CGFloat(sender.outputWidth), height: CGFloat(sender.outputHeight))
+                            let ndiLayout = computeStageLayout(in: ndiSize, frame: resolved.frame, time: resolved.time)
+                            let zoomXf = viewZoomTransform(in: ndiSize)
+                            sender.submitSwiftUIFrame {
+                                ZStack {
+                                    switch sender.backgroundMode {
+                                    case .transparentAlpha:
+                                        Color.clear
+                                    case .matchStage:
+                                        puppet.stageBackground.color
+                                    case .chromaGreen:
+                                        PuppetStageBackground.chromaGreen.color
+                                    case .solidWhite:
+                                        Color.white
+                                    }
+                                    Canvas { ndiCtx, _ in
+                                        ndiCtx.concatenate(zoomXf)
+                                        for part in ndiLayout.parts {
+                                            part.drawAction(&ndiCtx)
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -160,27 +236,38 @@ public struct PuppetStageView: View {
                                         state = value.translation
                                     }
                                     .onEnded { value in
-                                        puppet.stagePuppetOffset.width += value.translation.width / zoomScale
-                                        puppet.stagePuppetOffset.height += value.translation.height / zoomScale
-                                        puppet.saveCurrentPresetState()
+                                        let dx = value.translation.width / zoomScale
+                                        let dy = value.translation.height / zoomScale
+                                        if abs(dx) > 0.5 || abs(dy) > 0.5 {
+                                            puppet.recordUndoSnapshot()
+                                            puppet.stagePuppetOffset.width += dx
+                                            puppet.stagePuppetOffset.height += dy
+                                            puppet.saveCurrentPresetState()
+                                        }
                                     }
                             )
                             .onTapGesture(count: 2) {
                                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                                     zoomScale = 1.0
-                                    puppet.stagePuppetOffset = .zero
-                                    puppet.saveCurrentPresetState()
+                                    if puppet.stagePuppetOffset != .zero {
+                                        puppet.recordUndoSnapshot()
+                                        puppet.stagePuppetOffset = .zero
+                                        puppet.saveCurrentPresetState()
+                                    }
                                 }
                             }
                             .simultaneousGesture(
                                 SpatialTapGesture(coordinateSpace: .named("stageSpace"))
                                     .onEnded { value in
-                                        selectBodyPart(at: value.location, in: geo.size, layout: layout)
+                                        if allowPartEditing {
+                                            selectBodyPart(at: value.location, in: geo.size, layout: layout)
+                                        }
                                     }
                             )
 
                         // Interactive Photoshop-Style On-Stage Free Transform Box & Handles
-                        if puppet.showStageTransformBox,
+                        if allowPartEditing,
+                           puppet.showStageTransformBox,
                            let activePart = layout.parts.first(where: { $0.slot == puppet.selectedSlot }) {
                             freeTransformOverlay(for: activePart, in: geo.size, layout: layout, resolved: resolved)
                         }
@@ -509,12 +596,14 @@ public struct PuppetStageView: View {
         Divider()
 
         Button {
+            puppet.recordUndoSnapshot()
             puppet.followChildrenOnMove.toggle()
         } label: {
             Label("Children Follow Move", systemImage: puppet.followChildrenOnMove ? "checkmark" : "link")
         }
 
         Button {
+            puppet.recordUndoSnapshot()
             puppet.followChildrenOnRotate.toggle()
         } label: {
             Label("Children Follow Rotate", systemImage: puppet.followChildrenOnRotate ? "checkmark" : "arrow.triangle.2.circlepath")
@@ -544,7 +633,7 @@ public struct PuppetStageView: View {
         resolved: (frame: TrackedFrame, time: TimeInterval),
         value: DragGesture.Value
     ) {
-        if activeTransformSession == nil {
+        if activeTransformSession == nil || activeTransformSession?.startDragView != value.startLocation {
             puppet.recordUndoSnapshot()
             let startAng = atan2(value.startLocation.y - pivotView.y, value.startLocation.x - pivotView.x)
             activeTransformSession = FreeTransformDragSession(
@@ -775,48 +864,71 @@ public struct PuppetStageView: View {
                 }
                 .buttonStyle(.plain)
                 .fixedSize()
+                .help("Calibrate neutral face + body pose now")
 
-                // Active Viseme badge
-                HStack(spacing: 4) {
-                    Text(frame.faceMetrics.viseme.rawValue)
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Color.orange)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                if let onTimerCal = onCountdownCalibrate {
+                    Button {
+                        onTimerCal()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "timer")
+                                .font(.system(size: 10.5))
+                            Text(calibrationCountdown > 0 ? "\(calibrationCountdown)s" : "3s Pose")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .frame(minWidth: 42, alignment: .center)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(calibrationCountdown > 0 ? Color.cyan : Color.black.opacity(0.65))
+                        .foregroundStyle(calibrationCountdown > 0 ? Color.black : Color.cyan)
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("3-second countdown to step back into A-Pose / neutral posture before calibrating")
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.black.opacity(0.50))
-                .clipShape(Capsule())
-                .fixedSize()
+
+                // Active Viseme badge (fixed width so changing viseme labels never shifts toolbar items)
+                Text(frame.faceMetrics.viseme.rawValue)
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.orange)
+                    .lineLimit(1)
+                    .frame(width: 122, alignment: .center)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.50))
+                    .clipShape(Capsule())
+                    .fixedSize()
 
                 Spacer()
 
-                // Hierarchical Follow IK Switches (Move & Rotate chain propagation)
-                Menu {
-                    Toggle("Children Follow Move", isOn: $puppet.followChildrenOnMove)
-                    Toggle("Children Follow Rotate", isOn: $puppet.followChildrenOnRotate)
-                } label: {
-                    let bothOn = puppet.followChildrenOnMove && puppet.followChildrenOnRotate
-                    let anyOn = puppet.followChildrenOnMove || puppet.followChildrenOnRotate
-                    let modeTag = bothOn ? "M+R" : (puppet.followChildrenOnMove ? "Move" : (puppet.followChildrenOnRotate ? "Rot" : "Solo"))
-                    HStack(spacing: 4) {
-                        Image(systemName: anyOn ? "link" : "link.badge.minus")
-                            .font(.system(size: 10, weight: .semibold))
-                        Text("IK \(modeTag)")
-                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
+                if allowPartEditing {
+                    // Hierarchical Follow IK Switches (Move & Rotate chain propagation)
+                    Menu {
+                        Toggle("Children Follow Move", isOn: $puppet.followChildrenOnMove)
+                        Toggle("Children Follow Rotate", isOn: $puppet.followChildrenOnRotate)
+                    } label: {
+                        let bothOn = puppet.followChildrenOnMove && puppet.followChildrenOnRotate
+                        let anyOn = puppet.followChildrenOnMove || puppet.followChildrenOnRotate
+                        let modeTag = bothOn ? "M+R" : (puppet.followChildrenOnMove ? "Move" : (puppet.followChildrenOnRotate ? "Rot" : "Solo"))
+                        HStack(spacing: 4) {
+                            Image(systemName: anyOn ? "link" : "link.badge.minus")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text("IK \(modeTag)")
+                                .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(anyOn ? Color.teal.opacity(0.22) : Color.black.opacity(0.65))
+                        .foregroundStyle(anyOn ? Color.teal : Color.secondary)
+                        .clipShape(Capsule())
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(anyOn ? Color.teal.opacity(0.22) : Color.black.opacity(0.65))
-                    .foregroundStyle(anyOn ? Color.teal : Color.secondary)
-                    .clipShape(Capsule())
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Follow IK Chain: choose whether child limbs follow parent Move and/or Rotate")
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .help("Follow IK Chain: choose whether child limbs follow parent Move and/or Rotate")
 
                 // Stage Background Menu (Dark, Solid White, Chroma Green, Chroma Blue)
                 Menu {
@@ -935,28 +1047,30 @@ public struct PuppetStageView: View {
 
                 Spacer()
 
-                Toggle(isOn: Binding(
-                    get: { isPoseFrozen },
-                    set: { newVal in
-                        if newVal {
-                            frozenPoseFrame = frame
-                            frozenPoseTime = Date().timeIntervalSinceReferenceDate
-                        } else {
-                            frozenPoseFrame = nil
+                if allowPartEditing {
+                    Toggle(isOn: Binding(
+                        get: { isPoseFrozen },
+                        set: { newVal in
+                            if newVal {
+                                frozenPoseFrame = frame
+                                frozenPoseTime = Date().timeIntervalSinceReferenceDate
+                            } else {
+                                frozenPoseFrame = nil
+                            }
+                            isPoseFrozen = newVal
                         }
-                        isPoseFrozen = newVal
+                    )) {
+                        Label("Freeze", systemImage: isPoseFrozen ? "snowflake" : "pause.circle")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
-                )) {
-                    Label("Freeze", systemImage: isPoseFrozen ? "snowflake" : "pause.circle")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                    .tint(isPoseFrozen ? .cyan : .secondary)
+                    .fixedSize()
+                    .help("Freeze live camera tracking pose while clicking or transforming parts")
                 }
-                .toggleStyle(.button)
-                .controlSize(.mini)
-                .tint(isPoseFrozen ? .cyan : .secondary)
-                .fixedSize()
-                .help("Freeze live camera tracking pose while clicking or transforming parts")
 
                 Toggle(isOn: $puppet.showFullBodyLegs) {
                     Text("Full Body")
@@ -968,15 +1082,17 @@ public struct PuppetStageView: View {
                 .controlSize(.mini)
                 .fixedSize()
 
-                Toggle(isOn: $puppet.showPinsOnStage) {
-                    Text("Pins")
-                        .font(.system(size: 10.5, weight: .medium))
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
+                if allowPartEditing {
+                    Toggle(isOn: $puppet.showPinsOnStage) {
+                        Text("Pins")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .toggleStyle(.button)
+                    .controlSize(.mini)
+                    .fixedSize()
                 }
-                .toggleStyle(.button)
-                .controlSize(.mini)
-                .fixedSize()
             }
             .frame(height: 28)
         }
@@ -1010,6 +1126,42 @@ public struct PuppetStageView: View {
         var boxXf = CGAffineTransform.identity
         boxXf = boxXf.translatedBy(x: pivotStage.x, y: pivotStage.y)
         boxXf = boxXf.rotated(by: rotationRad)
+        boxXf = boxXf.translatedBy(x: -pivotInBox.x, y: -pivotInBox.y)
+
+        return (localXf, CGSize(width: effW, height: effH), boxXf, pivotInBox)
+    }
+
+    /// Local-axis hand transform: rotates out the sprite's intrinsic finger angle BEFORE applying palm flip & curl squash,
+    /// ensuring diagonal hand/paw graphics mirror cleanly across the finger axis instead of rotating 90 degrees.
+    private func makeHandAnchoredTransform(
+        pivotStage: CGPoint,
+        worldRotationRad: CGFloat,
+        intrinsicRotationRad: CGFloat,
+        flipX: CGFloat,
+        flipY: CGFloat,
+        pivotUV: CGPoint,
+        width: CGFloat,
+        height: CGFloat
+    ) -> (localToStage: CGAffineTransform, boxSize: CGSize, boxToStage: CGAffineTransform, pivotInBox: CGPoint) {
+        var localXf = CGAffineTransform.identity
+        localXf = localXf.translatedBy(x: pivotStage.x, y: pivotStage.y)
+        localXf = localXf.rotated(by: worldRotationRad)
+        localXf = localXf.scaledBy(x: flipX, y: flipY)
+        localXf = localXf.rotated(by: -intrinsicRotationRad)
+        localXf = localXf.translatedBy(x: -pivotUV.x * width, y: -pivotUV.y * height)
+
+        let effW: CGFloat = max(4.0, abs(flipX) * width)
+        let effH: CGFloat = max(4.0, abs(flipY) * height)
+        let effU: CGFloat = (flipX < 0.0) ? (1.0 - pivotUV.x) : pivotUV.x
+        let effV: CGFloat = (flipY < 0.0) ? (1.0 - pivotUV.y) : pivotUV.y
+        let pivotInBox = CGPoint(x: effU * effW, y: effV * effH)
+
+        let isOddReflection = (flipX * flipY) < 0.0
+        let boxRotationRad = worldRotationRad + (isOddReflection ? intrinsicRotationRad : -intrinsicRotationRad)
+
+        var boxXf = CGAffineTransform.identity
+        boxXf = boxXf.translatedBy(x: pivotStage.x, y: pivotStage.y)
+        boxXf = boxXf.rotated(by: boxRotationRad)
         boxXf = boxXf.translatedBy(x: -pivotInBox.x, y: -pivotInBox.y)
 
         return (localXf, CGSize(width: effW, height: effH), boxXf, pivotInBox)
@@ -1329,7 +1481,7 @@ public struct PuppetStageView: View {
         let partRotRad: CGFloat = CGFloat(xf.rotDeg * .pi / 180.0)
         let totalRotRad: CGFloat = ankleGroundTilt + partRotRad
 
-        let defaultSignX: CGFloat = isRightSide ? -1.0 : 1.0
+        let defaultSignX: CGFloat = needsMirror ? -1.0 : 1.0
         let finalFlipX: CGFloat = defaultSignX * (xf.flipH ? -1.0 : 1.0)
         let finalFlipY: CGFloat = xf.flipV ? -1.0 : 1.0
 
@@ -1638,37 +1790,61 @@ public struct PuppetStageView: View {
                 }
             }
 
-            // Mouth Viseme Layer
+            // Mouth Viseme Layer (gracefully falls back to available character mouths; never pulls missing slots)
             if puppet.mouthAnimationMode != .singleImageJawWarp {
-                let activeMouthSlot: PuppetPartSlot = {
+                func hasValidMouth(_ slot: PuppetPartSlot) -> Bool {
+                    puppet.partEnabled[slot] == true && puppet.partImages[slot] != nil
+                }
+                let visemeCandidates: [PuppetPartSlot] = {
                     switch fm.viseme {
-                    case .neutral: return .mouthNeutral
-                    case .ah, .wideOpen: return .mouthAh
-                    case .oh: return .mouthOh
-                    case .smile: return .mouthSmile
+                    case .neutral: return [.mouthNeutral, .mouthSmile, .mouthAh, .mouthOh]
+                    case .ah, .wideOpen: return [.mouthAh, .mouthOh, .mouthNeutral, .mouthSmile]
+                    case .oh: return [.mouthOh, .mouthAh, .mouthNeutral, .mouthSmile]
+                    case .smile: return [.mouthSmile, .mouthNeutral, .mouthAh, .mouthOh]
                     }
                 }()
-                if puppet.partEnabled[activeMouthSlot] == true,
+                if let activeMouthSlot = visemeCandidates.first(where: hasValidMouth),
                    let mouthImg = puppet.partImages[activeMouthSlot] {
-                    let mouthPt = featurePosition(uv: mouthUV, depthMultiplier: 1.15)
+                    let mOff = puppet.partOffset(for: activeMouthSlot)
+                    let baseMouthPt = featurePosition(uv: mouthUV, depthMultiplier: 1.15)
+                    let mouthPt = CGPoint(x: baseMouthPt.x + mOff.width * offsetUnit, y: baseMouthPt.y + mOff.height * offsetUnit)
+                    let mAnchor = puppet.pin(in: activeMouthSlot, id: "mouthAnchor")
                     let baseScaleFactor: CGFloat = 0.29
-                    let baseMW: CGFloat = headW * baseScaleFactor * CGFloat(puppet.mouthSpriteScale)
-                    let baseMH: CGFloat = baseMW * (mouthImg.size.height / max(1.0, mouthImg.size.width))
+                    let baseMW: CGFloat = headW * baseScaleFactor * CGFloat(puppet.mouthSpriteScale) * puppet.partWidth(for: activeMouthSlot)
+                    let baseMH: CGFloat = (headW * baseScaleFactor * CGFloat(puppet.mouthSpriteScale)) * (mouthImg.size.height / max(1.0, mouthImg.size.width)) * puppet.partHeight(for: activeMouthSlot)
                     let tweenScaleX: CGFloat = (puppet.mouthAnimationMode == .hybridVisemesAndWarp) ? (1.0 + CGFloat(fm.mouthSmile) * 0.18 - CGFloat(fm.mouthPucker) * 0.16) : 1.0
                     let tweenScaleY: CGFloat = (puppet.mouthAnimationMode == .hybridVisemesAndWarp && fm.viseme != .neutral) ? (0.85 + CGFloat(fm.mouthOpen) * 0.45) : 1.0
                     let mw: CGFloat = baseMW * tweenScaleX
                     let mh: CGFloat = baseMH * tweenScaleY
-                    headCtx.draw(Image(nsImage: mouthImg), in: CGRect(x: mouthPt.x - mw * 0.5, y: mouthPt.y - mh * 0.45, width: mw, height: mh))
+                    var mCtx = headCtx
+                    mCtx.translateBy(x: mouthPt.x, y: mouthPt.y)
+                    mCtx.rotate(by: .degrees(puppet.partRotationDegrees(for: activeMouthSlot)))
+                    mCtx.scaleBy(
+                        x: puppet.isPartFlippedH(activeMouthSlot) ? -1.0 : 1.0,
+                        y: puppet.isPartFlippedV(activeMouthSlot) ? -1.0 : 1.0
+                    )
+                    mCtx.draw(Image(nsImage: mouthImg), in: CGRect(x: -mw * mAnchor.x, y: -mh * (mAnchor.y - 0.05), width: mw, height: mh))
                 }
             }
 
             // Nose Layer
             if puppet.partEnabled[.noseOverlay] == true, let noseImg = puppet.partImages[.noseOverlay] {
-                let nosePt = featurePosition(uv: noseUV, depthMultiplier: 1.45)
+                let nOff = puppet.partOffset(for: .noseOverlay)
+                let baseNosePt = featurePosition(uv: noseUV, depthMultiplier: 1.45)
+                let nosePt = CGPoint(x: baseNosePt.x + nOff.width * offsetUnit, y: baseNosePt.y + nOff.height * offsetUnit)
+                let nAnchor = puppet.pin(in: .noseOverlay, id: "noseAnchor")
                 let baseNoseFactor: CGFloat = 0.145
-                let nw: CGFloat = headW * baseNoseFactor * CGFloat(puppet.noseSpriteScale)
-                let nh: CGFloat = nw * (noseImg.size.height / max(1.0, noseImg.size.width))
-                headCtx.draw(Image(nsImage: noseImg), in: CGRect(x: nosePt.x - nw * 0.5, y: nosePt.y - nh * 0.5, width: nw, height: nh))
+                let refNW: CGFloat = headW * baseNoseFactor * CGFloat(puppet.noseSpriteScale)
+                let nw: CGFloat = refNW * puppet.partWidth(for: .noseOverlay)
+                let nh: CGFloat = refNW * (noseImg.size.height / max(1.0, noseImg.size.width)) * puppet.partHeight(for: .noseOverlay)
+                var nCtx = headCtx
+                nCtx.translateBy(x: nosePt.x, y: nosePt.y)
+                nCtx.rotate(by: .degrees(puppet.partRotationDegrees(for: .noseOverlay)))
+                nCtx.scaleBy(
+                    x: puppet.isPartFlippedH(.noseOverlay) ? -1.0 : 1.0,
+                    y: puppet.isPartFlippedV(.noseOverlay) ? -1.0 : 1.0
+                )
+                nCtx.draw(Image(nsImage: noseImg), in: CGRect(x: -nw * nAnchor.x, y: -nh * nAnchor.y, width: nw, height: nh))
             }
 
             if puppet.showPinsOnStage, let headPins = puppet.pinsBySlot[.head] {
@@ -1685,46 +1861,78 @@ public struct PuppetStageView: View {
 
     private func buildLegJointTarget(
         hipStage: CGPoint,
+        groundedAnkleStage: CGPoint,
         thighLen: CGFloat,
         shinLen: CGFloat,
-        bodyTurn: CGFloat,
-        moveY: CGFloat,
-        stageHeight: CGFloat,
         isRightSide: Bool,
-        posePt: (Int) -> CGPoint?
+        isMirrored: Bool,
+        posePt: (_ idx: Int, _ requireFresh: Bool) -> CGPoint?
     ) -> (rawKnee: CGPoint, rawAnkle: CGPoint) {
         let sideSign: CGFloat = isRightSide ? 1.0 : -1.0
-        let crouch: CGFloat = max(0.0, moveY / max(1.0, stageHeight * 0.15))
-        let defaultKnee = CGPoint(
-            x: hipStage.x + sideSign * thighLen * (0.06 + crouch * 0.12) + sideSign * bodyTurn * 6.0,
-            y: hipStage.y + thighLen * (0.98 - crouch * 0.10)
-        )
-        let ankleDxFactor: CGFloat = sideSign * 0.02
-        let ankleDyFactor: CGFloat = 0.96
-        let defaultAnkle = CGPoint(
-            x: defaultKnee.x + thighLen * ankleDxFactor,
-            y: defaultKnee.y + shinLen * ankleDyFactor
-        )
 
-        let hipIdx = isRightSide ? 24 : 23
-        let kneeIdx = isRightSide ? 26 : 25
-        let ankleIdx = isRightSide ? 28 : 27
-        guard let pHip = posePt(hipIdx), let pKnee = posePt(kneeIdx) else {
-            return (defaultKnee, defaultAnkle)
+        // Solve 2-Bone Knee Bend IK to keep the ankle planted on the ground line!
+        func solveGroundedKnee(to targetAnkle: CGPoint) -> (CGPoint, CGPoint) {
+            let dx = targetAnkle.x - hipStage.x
+            let dy = targetAnkle.y - hipStage.y
+            let rawDist = max(1.0, hypot(dx, dy))
+            let maxReach = (thighLen + shinLen) * 0.992
+            let minReach = abs(thighLen - shinLen) + 4.0
+            let d = max(minReach, min(maxReach, rawDist))
+            let clampedAnkle = (rawDist > maxReach)
+                ? CGPoint(x: hipStage.x + (dx / rawDist) * maxReach, y: hipStage.y + (dy / rawDist) * maxReach)
+                : targetAnkle
+
+            let baseAng = atan2(clampedAnkle.y - hipStage.y, clampedAnkle.x - hipStage.x)
+            let cosA = max(-1.0, min(1.0, (thighLen * thighLen + d * d - shinLen * shinLen) / max(0.0001, 2.0 * thighLen * d)))
+            let bend = CGFloat(acos(Double(cosA)))
+
+            let pPlus = CGPoint(x: hipStage.x + cos(baseAng + bend) * thighLen, y: hipStage.y + sin(baseAng + bend) * thighLen)
+            let pMinus = CGPoint(x: hipStage.x + cos(baseAng - bend) * thighLen, y: hipStage.y + sin(baseAng - bend) * thighLen)
+            let mid = CGPoint(x: (hipStage.x + clampedAnkle.x) * 0.5, y: (hipStage.y + clampedAnkle.y) * 0.5)
+            // Natural outward knee bend away from midline
+            let pole = CGPoint(x: sideSign, y: 0.15)
+            let dotPlus = (pPlus.x - mid.x) * pole.x + (pPlus.y - mid.y) * pole.y
+            let dotMinus = (pMinus.x - mid.x) * pole.x + (pMinus.y - mid.y) * pole.y
+            let chosenKnee = (dotPlus >= dotMinus) ? pPlus : pMinus
+
+            let aDx = clampedAnkle.x - chosenKnee.x
+            let aDy = clampedAnkle.y - chosenKnee.y
+            let aDist = max(1.0, hypot(aDx, aDy))
+            let exactAnkle = CGPoint(x: chosenKnee.x + (aDx / aDist) * shinLen, y: chosenKnee.y + (aDy / aDist) * shinLen)
+            return (chosenKnee, exactAnkle)
         }
-        let a1: CGFloat = atan2(pKnee.y - pHip.y, pKnee.x - pHip.x)
-        guard a1 > 0.55 && a1 < 2.6 else {
-            return (defaultKnee, defaultAnkle)
-        }
-        let knee = CGPoint(x: hipStage.x + cos(a1) * thighLen, y: hipStage.y + sin(a1) * thighLen)
-        if let pAnkle = posePt(ankleIdx) {
-            let a2: CGFloat = atan2(pAnkle.y - pKnee.y, pAnkle.x - pKnee.x)
-            if a2 > 0.55 && a2 < 2.6 {
-                let ankle = CGPoint(x: knee.x + cos(a2) * shinLen, y: knee.y + sin(a2) * shinLen)
-                return (knee, ankle)
+
+        // Match screen-left vs screen-right leg directly by screen X (immune to mirror/unmirrored confusion)
+        let useLeftLandmarks: Bool = {
+            if let h23 = posePt(23, false), let h24 = posePt(24, false), abs(h23.x - h24.x) > 4.0 {
+                let leftOnScreenIs23 = (h23.x <= h24.x)
+                return isRightSide ? !leftOnScreenIs23 : leftOnScreenIs23
+            }
+            return isMirrored ? !isRightSide : isRightSide
+        }()
+        let hipIdx = useLeftLandmarks ? 23 : 24
+        let kneeIdx = useLeftLandmarks ? 25 : 26
+        let ankleIdx = useLeftLandmarks ? 27 : 28
+
+        if let pHip = posePt(hipIdx, false), let pKnee = posePt(kneeIdx, true), hypot(pKnee.x - pHip.x, pKnee.y - pHip.y) > 8.0 {
+            let a1: CGFloat = atan2(pKnee.y - pHip.y, pKnee.x - pHip.x)
+            let knee = CGPoint(x: hipStage.x + cos(a1) * thighLen, y: hipStage.y + sin(a1) * thighLen)
+            if let pAnkle = posePt(ankleIdx, true), hypot(pAnkle.x - pKnee.x, pAnkle.y - pKnee.y) > 8.0 {
+                let a2: CGFloat = atan2(pAnkle.y - pKnee.y, pAnkle.x - pKnee.x)
+                let rawTrackedAnkle = CGPoint(x: knee.x + cos(a2) * shinLen, y: knee.y + sin(a2) * shinLen)
+                // Lift freely above the floor; only clamp if tracked ankle pushes below the stage floor
+                if rawTrackedAnkle.y <= groundedAnkleStage.y + 4.0 {
+                    return (knee, rawTrackedAnkle)
+                }
+                return solveGroundedKnee(to: CGPoint(x: rawTrackedAnkle.x, y: groundedAnkleStage.y))
+            } else if knee.y < hipStage.y + thighLen * 0.72 {
+                // High knee lift even if ankle is off-camera: hang shin naturally below the raised knee
+                let hangAnkle = CGPoint(x: knee.x + sideSign * shinLen * 0.08, y: min(groundedAnkleStage.y, knee.y + shinLen))
+                return (knee, hangAnkle)
             }
         }
-        return (knee, CGPoint(x: knee.x + sideSign * thighLen * 0.04, y: knee.y + shinLen))
+
+        return solveGroundedKnee(to: groundedAnkleStage)
     }
 
     private func computeStageLayout(in size: CGSize, frame activeFrame: TrackedFrame, time: TimeInterval) -> StageLayoutResult {
@@ -1733,7 +1941,13 @@ public struct PuppetStageView: View {
         let charScale: CGFloat = CGFloat(puppet.characterScale)
         let moveX: CGFloat = CGFloat(fm.headX) * CGFloat(puppet.headMoveAmount) * (size.width * 0.16)
         let moveY: CGFloat = CGFloat(fm.headY) * CGFloat(puppet.headMoveAmount) * (size.height * 0.14)
-        let rawScaleDelta: CGFloat = 1.0 + (CGFloat(fm.headScale) - 1.0) * CGFloat(puppet.headScaleAmount)
+        let rawScaleDelta: CGFloat = {
+            if puppet.showFullBodyLegs {
+                // Full-body grounded characters never pump overall size on head/body turns
+                return 1.0
+            }
+            return 1.0 + (CGFloat(fm.headScale) - 1.0) * CGFloat(puppet.headScaleAmount)
+        }()
         let clampedScale: CGFloat = max(0.60, min(1.55, rawScaleDelta))
         let offsetUnit: CGFloat = partOffsetUnit(in: size, scaleDelta: clampedScale)
 
@@ -1743,9 +1957,17 @@ public struct PuppetStageView: View {
         let bodyTurn: CGFloat = headTurn * CGFloat(puppet.bodyTurnAmount)
 
         let pose = activeFrame.poseLandmarks
-        func posePt(_ idx: Int) -> CGPoint? {
+        let poseFresh = activeFrame.poseJointFresh
+        let isMirrored = activeFrame.isMirrored
+        let frameAspect = CGFloat(max(0.35, activeFrame.frameAspect))
+        // Isotropic stage projection: keeps true anatomical angles & proportions regardless of stage aspect ratio!
+        let isoUnit = size.height
+        let isoXShift = (size.width - size.height * frameAspect) * 0.5
+        func posePt(_ idx: Int, requireFresh: Bool = false) -> CGPoint? {
             guard idx < pose.count, let lm = pose[idx] else { return nil }
-            return CGPoint(x: (1.0 - CGFloat(lm.x)) * size.width, y: CGFloat(lm.y) * size.height)
+            if requireFresh && idx < poseFresh.count && !poseFresh[idx] { return nil }
+            let sx = isMirrored ? (1.0 - CGFloat(lm.x)) : CGFloat(lm.x)
+            return CGPoint(x: isoXShift + sx * frameAspect * isoUnit, y: CGFloat(lm.y) * isoUnit)
         }
 
         let torsoRoll: CGFloat = {
@@ -1764,18 +1986,66 @@ public struct PuppetStageView: View {
         let baseCenterY: CGFloat = puppet.showFullBodyLegs ? 0.36 : 0.62
         let liveMoveX: CGFloat = livePuppetDrag.width / max(0.25, zoomScale)
         let liveMoveY: CGFloat = livePuppetDrag.height / max(0.25, zoomScale)
+        let torsoHeightFactor: CGFloat = 0.90
+        let legLenMult: CGFloat = CGFloat(puppet.legLengthScale)
+        let legThickMult: CGFloat = CGFloat(puppet.legThicknessScale)
+        let armLenMult: CGFloat = CGFloat(puppet.armLengthScale)
+        let armThickMult: CGFloat = CGFloat(puppet.armThicknessScale)
+
+        let neckMountUV = puppet.pin(in: .torso, id: "neckMount")
+        let lShoulderUV = puppet.pin(in: .torso, id: "leftShoulder")
+        let rShoulderUV = puppet.pin(in: .torso, id: "rightShoulder")
+        let waistUV = puppet.pin(in: .torso, id: "waistPivot")
+
+        // Compute fixed Ground Ankle Y at neutral scale (1.0) so full-body characters stay anchored on the floor!
+        let neutralRefHeadH: CGFloat = size.height * charScale * 0.92
+        let neutralRefTorsoH: CGFloat = neutralRefHeadH * torsoHeightFactor
+        let neutralTorsoH: CGFloat = neutralRefTorsoH * puppet.partHeight(for: .torso)
+        let neutralNeckToHipY: CGFloat = {
+            if puppet.partEnabled[.pelvis] == true {
+                let waistDy = (waistUV.y - neckMountUV.y) * neutralTorsoH
+                let pelvisH0 = neutralRefTorsoH * 0.44 * puppet.partHeight(for: .pelvis)
+                let wJointUV = puppet.pin(in: .pelvis, id: "waistJoint")
+                let lhUV = puppet.pin(in: .pelvis, id: "leftHip")
+                let rhUV = puppet.pin(in: .pelvis, id: "rightHip")
+                return waistDy + (((lhUV.y + rhUV.y) * 0.5) - wJointUV.y) * pelvisH0
+            } else {
+                let lhY = puppet.pinsBySlot[.torso]?.first(where: { $0.id == "leftHip" })?.point.y ?? 0.88
+                let rhY = puppet.pinsBySlot[.torso]?.first(where: { $0.id == "rightHip" })?.point.y ?? 0.88
+                return (((lhY + rhY) * 0.5) - neckMountUV.y) * neutralTorsoH
+            }
+        }()
+        let avgThighHScale = (puppet.partHeight(for: .leftThigh) + puppet.partHeight(for: .rightThigh)) * 0.5
+        let avgShinHScale = (puppet.partHeight(for: .leftShin) + puppet.partHeight(for: .rightShin)) * 0.5
+        let neutralLegDrop: CGFloat = neutralRefTorsoH * 0.50 * legLenMult * (avgThighHScale * 0.975 + avgShinHScale * 0.965)
+        let neutralNeckToAnkle: CGFloat = max(20.0, neutralNeckToHipY + neutralLegDrop)
+        let groundAnkleY: CGFloat = size.height * baseCenterY + puppet.stagePuppetOffset.height + liveMoveY + neutralNeckToAnkle
+
+        let resolvedNeckStageY: CGFloat = {
+            if puppet.showFullBodyLegs {
+                let standingNeckY = groundAnkleY - neutralNeckToAnkle * clampedScale
+                // Clamp upward head motion (moveY < 0) to 0 so lifting head never floats the puppet off the floor;
+                // downward motion (moveY > 0) crouches hips down and bends knees via 2-bone IK!
+                let crouchDropY = max(0.0, min(neutralLegDrop * clampedScale * 0.44, moveY))
+                return standingNeckY + crouchDropY
+            } else {
+                return size.height * baseCenterY + puppet.stagePuppetOffset.height + liveMoveY + moveY
+            }
+        }()
+
+        // Note: pure head yaw (bodyTurn) twists in place and never translates X
+        let baseStageOriginX: CGFloat = size.width * 0.50 + puppet.stagePuppetOffset.width + liveMoveX
         let baseNeckStage = CGPoint(
-            x: size.width * 0.50 + puppet.stagePuppetOffset.width + liveMoveX + moveX + bodyTurn * (size.width * 0.025),
-            y: size.height * baseCenterY + puppet.stagePuppetOffset.height + liveMoveY + moveY
+            x: baseStageOriginX + moveX,
+            y: resolvedNeckStageY
         )
 
-        let refHeadH: CGFloat = size.height * charScale * 0.92 * clampedScale
+        let refHeadH: CGFloat = neutralRefHeadH * clampedScale
         let headH: CGFloat = refHeadH * puppet.partHeight(for: .head)
         _ = headH
 
         let torsoImg = puppet.partImages[.torso]
         let torsoAspect: CGFloat = (torsoImg?.size.width ?? 512.0) / max(1.0, torsoImg?.size.height ?? 440.0)
-        let torsoHeightFactor: CGFloat = 0.90
         let refTorsoH: CGFloat = refHeadH * torsoHeightFactor
         let torsoH: CGFloat = refTorsoH * puppet.partHeight(for: .torso)
         let torsoPerspectiveScaleX: CGFloat = max(0.84, 1.0 - abs(bodyTurn) * 0.06)
@@ -1788,11 +2058,6 @@ public struct PuppetStageView: View {
             let s: CGFloat = sin(angle)
             return CGPoint(x: v.x * c - v.y * s, y: v.x * s + v.y * c)
         }
-
-        let neckMountUV = puppet.pin(in: .torso, id: "neckMount")
-        let lShoulderUV = puppet.pin(in: .torso, id: "leftShoulder")
-        let rShoulderUV = puppet.pin(in: .torso, id: "rightShoulder")
-        let waistUV = puppet.pin(in: .torso, id: "waistPivot")
 
         let torsoRawOff = puppet.partOffset(for: .torso)
         let torsoChainMove = followMove
@@ -1818,11 +2083,6 @@ public struct PuppetStageView: View {
         let leftShoulderStage = torsoUVToStage(lShoulderUV, depthFactor: 0.8)
         let rightShoulderStage = torsoUVToStage(rShoulderUV, depthFactor: 0.8)
         let waistStage = torsoUVToStage(waistUV, depthFactor: -0.3)
-
-        let legLenMult: CGFloat = CGFloat(puppet.legLengthScale)
-        let legThickMult: CGFloat = CGFloat(puppet.legThicknessScale)
-        let armLenMult: CGFloat = CGFloat(puppet.armLengthScale)
-        let armThickMult: CGFloat = CGFloat(puppet.armThicknessScale)
 
         var partsBySlot: [PuppetPartSlot: PlacedStagePart] = [:]
         var stagePins: [(point: CGPoint, color: Color)] = []
@@ -1903,6 +2163,10 @@ public struct PuppetStageView: View {
 
             func pelvisUVToStage(_ uv: CGPoint) -> CGPoint {
                 if puppet.partEnabled[.pelvis] != true {
+                    let hipPinId = (uv.x < 0.5) ? "leftHip" : "rightHip"
+                    if let torsoHipPin = puppet.pinsBySlot[.torso]?.first(where: { $0.id == hipPinId }) {
+                        return torsoUVToStage(torsoHipPin.point, depthFactor: 0.4)
+                    }
                     let hipY: CGFloat = 0.88
                     let hipX: CGFloat = (uv.x < 0.5) ? 0.34 : 0.66
                     return torsoUVToStage(CGPoint(x: hipX, y: hipY), depthFactor: 0.4)
@@ -1936,15 +2200,31 @@ public struct PuppetStageView: View {
                 let baseLen: CGFloat = baseThighLen
                 let thighLen: CGFloat = baseLen * legLenMult * puppet.partHeight(for: side.thighSlot)
                 let shinLen: CGFloat = baseShinLen * legLenMult * puppet.partHeight(for: side.shinSlot)
+                let sideSign: CGFloat = side.isRight ? 1.0 : -1.0
+
+                let restHipOffsetX: CGFloat = {
+                    if puppet.partEnabled[.pelvis] == true {
+                        let hipUV = side.isRight ? rHipUV : lHipUV
+                        return (waistUV.x - neckMountUV.x) * torsoW + (hipUV.x - waistJointUV.x) * pelvisW
+                    } else {
+                        let hipPinId = side.isRight ? "rightHip" : "leftHip"
+                        let fallbackX: CGFloat = side.isRight ? 0.66 : 0.34
+                        let hx = puppet.pinsBySlot[.torso]?.first(where: { $0.id == hipPinId })?.point.x ?? fallbackX
+                        return (hx - neckMountUV.x) * torsoW
+                    }
+                }()
+                let groundedAnkleStage = CGPoint(
+                    x: baseStageOriginX + torsoChainMove.width + pelvisChainMove.width + moveX * 0.85 + restHipOffsetX + sideSign * thighLen * 0.08,
+                    y: groundAnkleY + torsoChainMove.height + pelvisChainMove.height
+                )
 
                 let legTarget = buildLegJointTarget(
                     hipStage: side.hipStage,
+                    groundedAnkleStage: groundedAnkleStage,
                     thighLen: thighLen,
                     shinLen: shinLen,
-                    bodyTurn: bodyTurn,
-                    moveY: moveY,
-                    stageHeight: size.height,
                     isRightSide: side.isRight,
+                    isMirrored: isMirrored,
                     posePt: posePt
                 )
 
@@ -2026,9 +2306,12 @@ public struct PuppetStageView: View {
             }
         }
 
-        // Arms & Hands
+        // Arms & Hands (Hand-Led Soft-IK with Clavicle Lead & Gravity Pole Vector)
         let baseUpperArmLen: CGFloat = refTorsoH * 0.52
         let baseForearmLen: CGFloat = refTorsoH * 0.50
+        let headImgAspect: CGFloat = (puppet.partImages[.head]?.size.width ?? 512.0) / max(1.0, puppet.partImages[.head]?.size.height ?? 512.0)
+        let approxHeadW: CGFloat = headH * headImgAspect * puppet.partWidth(for: .head)
+        let reachExag: CGFloat = CGFloat(puppet.armReachExaggeration)
         let realHeadX: CGFloat = CGFloat(fm.present ? fm.rawAnchorX : 0.50)
         let realHeadY: CGFloat = CGFloat(fm.present ? fm.rawAnchorY : 0.48)
         let realHeadCameraH: CGFloat = max(0.14, min(0.45, CGFloat(fm.present ? fm.rawIOD : 0.085) * 2.8))
@@ -2036,20 +2319,31 @@ public struct PuppetStageView: View {
             if let ls = posePt(11), let rs = posePt(12) {
                 return max(40.0, hypot(rs.x - ls.x, rs.y - ls.y))
             }
-            return max(40.0, size.width * 0.22)
+            if let calSpan = calibrationBaseline.calibratedShoulderSpan, calSpan > 0.08 {
+                return CGFloat(calSpan) * isoUnit
+            }
+            return max(40.0, isoUnit * frameAspect * 0.22)
+        }()
+        let calUpperLenStage: CGFloat? = calibrationBaseline.calibratedUpperArmLen.map { CGFloat($0) * isoUnit }
+        let calForeLenStage: CGFloat? = calibrationBaseline.calibratedForearmLen.map { CGFloat($0) * isoUnit }
+        let camTotalArmReachStage: CGFloat = {
+            if let cu = calUpperLenStage, let cf = calForeLenStage, (cu + cf) > 30.0 {
+                return cu + cf
+            }
+            return max(camShoulderSpan * 1.48, realHeadCameraH * isoUnit * 1.85)
         }()
 
-        let armSides: [(isLeft: Bool, shoulderStage: CGPoint, upperSlot: PuppetPartSlot, foreSlot: PuppetPartSlot, handSlot: PuppetPartSlot, poseShoulderIdx: Int, poseElbowIdx: Int, poseWristIdx: Int)] = [
-            (true, leftShoulderStage, .leftUpperArm, .leftForearm, .leftHand, 11, 13, 15),
-            (false, rightShoulderStage, .rightUpperArm, .rightForearm, .rightHand, 12, 14, 16)
+        let armSides: [(isLeft: Bool, shoulderStage: CGPoint, upperSlot: PuppetPartSlot, foreSlot: PuppetPartSlot, handSlot: PuppetPartSlot, handBackSlot: PuppetPartSlot, poseShoulderIdx: Int, poseElbowIdx: Int, poseWristIdx: Int)] = [
+            (true, leftShoulderStage, .leftUpperArm, .leftForearm, .leftHand, .leftHandBack, 11, 13, 15),
+            (false, rightShoulderStage, .rightUpperArm, .rightForearm, .rightHand, .rightHandBack, 12, 14, 16)
         ]
 
         for side in armSides {
             let label = side.isLeft ? "L" : "R"
             let trackedHand = activeFrame.hands.first(where: { $0.label == label && $0.smoothedLandmarks.count >= 21 })
             let pShoulder = posePt(side.poseShoulderIdx)
-            let pElbow = posePt(side.poseElbowIdx)
-            let pPoseWrist = posePt(side.poseWristIdx)
+            let pElbow = posePt(side.poseElbowIdx, requireFresh: true)
+            let pPoseWrist = posePt(side.poseWristIdx, requireFresh: true)
             let hasForearm = (puppet.partEnabled[side.foreSlot] != false && (puppet.partImages[side.foreSlot] != nil || puppet.partImages[.leftForearm] != nil))
 
             let upperArmLen: CGFloat = baseUpperArmLen * armLenMult * puppet.partHeight(for: side.upperSlot)
@@ -2057,62 +2351,160 @@ public struct PuppetStageView: View {
             let baseOnePieceLen: CGFloat = refTorsoH * 0.94
             let onePieceLen: CGFloat = baseOnePieceLen * armLenMult * puppet.partHeight(for: side.upperSlot)
 
-            let (rawElbow, rawWrist, rawHandAngle, handDepthScale, palmSign): (CGPoint, CGPoint, CGFloat, CGFloat, CGFloat) = {
+            let (effShoulder, rawElbow, rawWrist, rawHandAngle, handDepthScale, palmSign): (CGPoint, CGPoint, CGPoint, CGFloat, CGFloat, CGFloat) = {
+                let sway: CGFloat = CGFloat(sin(time * 2.1 + (side.isLeft ? 0.0 : 1.2))) * 0.04 * CGFloat(puppet.idleMotionAmount)
+                let outSign: CGFloat = side.isLeft ? -1.0 : 1.0
+                let restElbow = CGPoint(
+                    x: side.shoulderStage.x + outSign * upperArmLen * (0.24 + sway),
+                    y: side.shoulderStage.y + upperArmLen * 0.94
+                )
+                let restWrist: CGPoint = {
+                    if !hasForearm {
+                        return CGPoint(
+                            x: side.shoulderStage.x + outSign * onePieceLen * (0.16 + sway * 0.5),
+                            y: side.shoulderStage.y + onePieceLen * 0.96
+                        )
+                    }
+                    return CGPoint(
+                        x: restElbow.x + outSign * forearmLen * 0.08,
+                        y: restElbow.y + forearmLen * 0.90
+                    )
+                }()
+                let restDx: CGFloat = restWrist.x - (hasForearm ? restElbow.x : side.shoulderStage.x)
+                let restDy: CGFloat = restWrist.y - (hasForearm ? restElbow.y : side.shoulderStage.y)
+                let restHandAngle: CGFloat = atan2(restDy, restDx) + .pi * 0.5
+
                 if let hand = trackedHand {
-                    let wristX: CGFloat = 1.0 - CGFloat(hand.smoothedLandmarks[0].x)
+                    let wristX: CGFloat = isMirrored ? (1.0 - CGFloat(hand.smoothedLandmarks[0].x)) : CGFloat(hand.smoothedLandmarks[0].x)
                     let wristY: CGFloat = CGFloat(hand.smoothedLandmarks[0].y)
-                    let palmX: CGFloat = 1.0 - CGFloat(hand.smoothedLandmarks[9].x)
+                    let palmX: CGFloat = isMirrored ? (1.0 - CGFloat(hand.smoothedLandmarks[9].x)) : CGFloat(hand.smoothedLandmarks[9].x)
                     let palmY: CGFloat = CGFloat(hand.smoothedLandmarks[9].y)
                     let handScreenX: CGFloat = wristX * 0.72 + palmX * 0.28
                     let handScreenY: CGFloat = wristY * 0.78 + palmY * 0.22
 
-                    // Anatomical ground-truth shoulder-relative reach:
-                    let outSign: CGFloat = side.isLeft ? -1.0 : 1.0
                     let camShoulderStagePt: CGPoint = {
                         if let ps = pShoulder { return ps }
                         let estimatedCamX = (realHeadX + outSign * realHeadCameraH * 0.88)
                         let estimatedCamY = (realHeadY + realHeadCameraH * 1.05)
-                        return CGPoint(x: estimatedCamX * size.width, y: estimatedCamY * size.height)
+                        return CGPoint(x: isoXShift + estimatedCamX * frameAspect * isoUnit, y: estimatedCamY * isoUnit)
                     }()
-                    let handStagePt = CGPoint(x: handScreenX * size.width, y: handScreenY * size.height)
-                    let dCamX = (handStagePt.x - camShoulderStagePt.x) / max(1.0, realHeadCameraH * size.height)
-                    let dCamY = (handStagePt.y - camShoulderStagePt.y) / max(1.0, realHeadCameraH * size.height)
+                    let handStagePt = CGPoint(x: isoXShift + handScreenX * frameAspect * isoUnit, y: handScreenY * isoUnit)
+                    // Normalize camera wrist vector by calibrated human arm span (so resting/down/up poses match 1:1!)
+                    let dCamX = (handStagePt.x - camShoulderStagePt.x) / max(40.0, camTotalArmReachStage)
+                    let dCamY = (handStagePt.y - camShoulderStagePt.y) / max(40.0, camTotalArmReachStage)
 
-                    let totalArmSpan: CGFloat = upperArmLen + (hasForearm ? forearmLen : 0.0)
-                    let reachUnit: CGFloat = (totalArmSpan / 2.05) * max(0.85, armLenMult)
-                    let rawTargetWrist = CGPoint(
-                        x: side.shoulderStage.x + dCamX * reachUnit,
-                        y: side.shoulderStage.y + dCamY * reachUnit
+                    // 1. Hand-Led Reach Mapping (scales outward past wide mascot heads as armReachExaggeration increases)
+                    let restArmSpan: CGFloat = upperArmLen + (hasForearm ? forearmLen : 0.0)
+                    let baseReachUnit: CGFloat = restArmSpan * max(0.88, armLenMult)
+                    let headClearUnit: CGFloat = max(baseReachUnit, restArmSpan + headH * 0.28)
+                    let effectiveReachUnit: CGFloat = baseReachUnit
+                        + (headClearUnit - baseReachUnit) * min(1.0, reachExag * 0.85)
+                        + baseReachUnit * reachExag * 0.25
+
+                    var desiredWrist = CGPoint(
+                        x: side.shoulderStage.x + dCamX * effectiveReachUnit,
+                        y: side.shoulderStage.y + dCamY * effectiveReachUnit
                     )
-                    let depthScale: CGFloat = max(0.88, min(1.18, CGFloat(hand.scale)))
+
+                    // Blend towards live fresh body-pose wrist direction if available (ensures 1:1 upper/lower arm match!)
+                    if let pw = pPoseWrist, let ps = pShoulder {
+                        let pDx = (pw.x - ps.x) / max(40.0, camTotalArmReachStage)
+                        let pDy = (pw.y - ps.y) / max(40.0, camTotalArmReachStage)
+                        let poseTarget = CGPoint(
+                            x: side.shoulderStage.x + pDx * effectiveReachUnit,
+                            y: side.shoulderStage.y + pDy * effectiveReachUnit
+                        )
+                        desiredWrist = CGPoint(
+                            x: desiredWrist.x * 0.70 + poseTarget.x * 0.30,
+                            y: desiredWrist.y * 0.70 + poseTarget.y * 0.30
+                        )
+                    }
+
+                    // When user's real hand is clearly outside their face at head height, push mascot hand outside wide cheeks
+                    let camOutsideFace = outSign * (handScreenX - realHeadX)
+                    if reachExag > 0.05 && camOutsideFace > realHeadCameraH * 0.52 && desiredWrist.y < side.shoulderStage.y + headH * 0.15 {
+                        let cheekEdgeX = chainNeckStage.x + outSign * (approxHeadW * 0.52)
+                        let blend = min(1.0, reachExag * 1.2) * min(1.0, (camOutsideFace - realHeadCameraH * 0.52) / max(0.05, realHeadCameraH * 0.45))
+                        if outSign * (desiredWrist.x - cheekEdgeX) < 0 {
+                            desiredWrist.x = desiredWrist.x + (cheekEdgeX - desiredWrist.x) * blend
+                        }
+                    }
+
+                    // Blend smoothly toward resting A-pose when tracking has been lost for >2s
+                    let restBlend = CGFloat(hand.returnToRestBlend)
+                    if restBlend > 0.001 {
+                        desiredWrist = CGPoint(
+                            x: desiredWrist.x + (restWrist.x - desiredWrist.x) * restBlend,
+                            y: desiredWrist.y + (restWrist.y - desiredWrist.y) * restBlend
+                        )
+                    }
+
+                    // 2. Clavicle / Shoulder Lead (subtle anatomical shift of shoulder toward reaching hand)
+                    let rawDx = desiredWrist.x - side.shoulderStage.x
+                    let rawDy = desiredWrist.y - side.shoulderStage.y
+                    let distFromBase = max(1.0, hypot(rawDx, rawDy))
+                    let clavicleShift: CGFloat = {
+                        guard distFromBase > restArmSpan * 0.60 else { return 0.0 }
+                        let maxShift = restArmSpan * (0.04 + reachExag * 0.11) * (1.0 - restBlend)
+                        let t = CGFloat(tanh(Double((distFromBase - restArmSpan * 0.60) / max(1.0, restArmSpan * 0.65))))
+                        return maxShift * t
+                    }()
+                    let activeShoulder = CGPoint(
+                        x: side.shoulderStage.x + (rawDx / distFromBase) * clavicleShift,
+                        y: side.shoulderStage.y + (rawDy / distFromBase) * clavicleShift
+                    )
+
+                    // 3. Analytic Soft-IK Stretch (allows smooth elastic reach while retaining natural elbow bend)
+                    let effDx = desiredWrist.x - activeShoulder.x
+                    let effDy = desiredWrist.y - activeShoulder.y
+                    let distFromShoulder = max(1.0, hypot(effDx, effDy))
+                    let constraintLimit: CGFloat = 0.985 - CGFloat(puppet.humanAnatomyConstraints) * 0.045
+                    let softStart: CGFloat = restArmSpan * 0.80
+                    let maxSpan: CGFloat = restArmSpan * (1.0 + reachExag * 0.65)
+                    let softTargetDist: CGFloat = {
+                        if distFromShoulder <= softStart || maxSpan <= restArmSpan {
+                            return min(distFromShoulder, restArmSpan * constraintLimit)
+                        }
+                        let room = max(1.0, maxSpan - softStart)
+                        let excess = distFromShoulder - softStart
+                        return softStart + room * CGFloat(tanh(Double(excess / room)))
+                    }()
+                    let stretchFactor: CGFloat = max(1.0, softTargetDist / max(1.0, restArmSpan * constraintLimit))
+
+                    let rawDepthScale: CGFloat = max(0.88, min(1.18, CGFloat(hand.scale)))
+                    let depthScale: CGFloat = rawDepthScale + (1.0 - rawDepthScale) * restBlend
+                    let angleDiff = atan2(sin(restHandAngle - CGFloat(hand.wristAngle)), cos(restHandAngle - CGFloat(hand.wristAngle)))
+                    let blendedWristAngle = CGFloat(hand.wristAngle) + angleDiff * restBlend
+                    let blendedPalmSign = CGFloat(hand.palmFacingSign) + (1.0 - CGFloat(hand.palmFacingSign)) * restBlend
+
                     if hasForearm {
+                        let effUpper = upperArmLen * stretchFactor
+                        let effFore = forearmLen * stretchFactor
                         let elbow = solveTwoBoneIKElbow(
-                            shoulder: side.shoulderStage,
-                            targetWrist: rawTargetWrist,
-                            len1: upperArmLen,
-                            len2: forearmLen,
+                            shoulder: activeShoulder,
+                            targetWrist: desiredWrist,
+                            len1: effUpper,
+                            len2: effFore,
                             isLeftArm: side.isLeft,
                             poseShoulder: pShoulder,
                             poseElbow: pElbow
                         )
-                        let fDx: CGFloat = rawTargetWrist.x - elbow.x
-                        let fDy: CGFloat = rawTargetWrist.y - elbow.y
+                        let fDx: CGFloat = desiredWrist.x - elbow.x
+                        let fDy: CGFloat = desiredWrist.y - elbow.y
                         let fDist: CGFloat = max(1.0, hypot(fDx, fDy))
                         let wrist = CGPoint(
-                            x: elbow.x + (fDx / fDist) * forearmLen,
-                            y: elbow.y + (fDy / fDist) * forearmLen
+                            x: elbow.x + (fDx / fDist) * effFore,
+                            y: elbow.y + (fDy / fDist) * effFore
                         )
-                        return (elbow, wrist, CGFloat(hand.wristAngle), depthScale, CGFloat(hand.palmFacingSign))
+                        return (activeShoulder, elbow, wrist, blendedWristAngle, depthScale, blendedPalmSign)
                     } else {
-                        let sDx: CGFloat = rawTargetWrist.x - side.shoulderStage.x
-                        let sDy: CGFloat = rawTargetWrist.y - side.shoulderStage.y
-                        let sDist: CGFloat = max(1.0, hypot(sDx, sDy))
-                        let clampedLen: CGFloat = max(onePieceLen * 0.78, min(onePieceLen * 1.02, sDist))
+                        let effOneLen = onePieceLen * stretchFactor
+                        let clampedLen: CGFloat = max(onePieceLen * 0.78, min(effOneLen, distFromShoulder))
                         let wrist = CGPoint(
-                            x: side.shoulderStage.x + (sDx / sDist) * clampedLen,
-                            y: side.shoulderStage.y + (sDy / sDist) * clampedLen
+                            x: activeShoulder.x + (effDx / distFromShoulder) * clampedLen,
+                            y: activeShoulder.y + (effDy / distFromShoulder) * clampedLen
                         )
-                        return (side.shoulderStage, wrist, CGFloat(hand.wristAngle), depthScale, CGFloat(hand.palmFacingSign))
+                        return (activeShoulder, activeShoulder, wrist, blendedWristAngle, depthScale, blendedPalmSign)
                     }
                 } else if let pS = pShoulder, let pE = pElbow, let pW = pPoseWrist,
                           hypot(pE.x - pS.x, pE.y - pS.y) > 12.0,
@@ -2126,47 +2518,27 @@ public struct PuppetStageView: View {
                     let foreAngle: CGFloat = atan2(fDy, fDx)
                     let fForeshorten: CGFloat = max(0.65, min(1.08, hypot(fDx, fDy) / (camShoulderSpan * 0.76)))
                     let resolvedHandAngle: CGFloat = foreAngle + .pi * 0.5
+                    let poseStretch: CGFloat = 1.0 + reachExag * 0.22
                     if hasForearm {
                         let elbow = CGPoint(
-                            x: side.shoulderStage.x + cos(upperAngle) * upperArmLen * uForeshorten,
-                            y: side.shoulderStage.y + sin(upperAngle) * upperArmLen * uForeshorten
+                            x: side.shoulderStage.x + cos(upperAngle) * upperArmLen * uForeshorten * poseStretch,
+                            y: side.shoulderStage.y + sin(upperAngle) * upperArmLen * uForeshorten * poseStretch
                         )
                         let wrist = CGPoint(
-                            x: elbow.x + cos(foreAngle) * forearmLen * fForeshorten,
-                            y: elbow.y + sin(foreAngle) * forearmLen * fForeshorten
+                            x: elbow.x + cos(foreAngle) * forearmLen * fForeshorten * poseStretch,
+                            y: elbow.y + sin(foreAngle) * forearmLen * fForeshorten * poseStretch
                         )
-                        return (elbow, wrist, resolvedHandAngle, 1.0, 1.0)
+                        return (side.shoulderStage, elbow, wrist, resolvedHandAngle, 1.0, 1.0)
                     } else {
                         let totalAngle: CGFloat = atan2(pW.y - pS.y, pW.x - pS.x)
                         let wrist = CGPoint(
-                            x: side.shoulderStage.x + cos(totalAngle) * onePieceLen,
-                            y: side.shoulderStage.y + sin(totalAngle) * onePieceLen
+                            x: side.shoulderStage.x + cos(totalAngle) * onePieceLen * poseStretch,
+                            y: side.shoulderStage.y + sin(totalAngle) * onePieceLen * poseStretch
                         )
-                        return (side.shoulderStage, wrist, resolvedHandAngle, 1.0, 1.0)
+                        return (side.shoulderStage, side.shoulderStage, wrist, resolvedHandAngle, 1.0, 1.0)
                     }
                 } else {
-                    let sway: CGFloat = CGFloat(sin(time * 2.1 + (side.isLeft ? 0.0 : 1.2))) * 0.04 * CGFloat(puppet.idleMotionAmount)
-                    let outSign: CGFloat = side.isLeft ? -1.0 : 1.0
-                    let elbow = CGPoint(
-                        x: side.shoulderStage.x + outSign * upperArmLen * (0.24 + sway),
-                        y: side.shoulderStage.y + upperArmLen * 0.94
-                    )
-                    let wrist: CGPoint = {
-                        if !hasForearm {
-                            return CGPoint(
-                                x: side.shoulderStage.x + outSign * onePieceLen * (0.16 + sway * 0.5),
-                                y: side.shoulderStage.y + onePieceLen * 0.96
-                            )
-                        }
-                        return CGPoint(
-                            x: elbow.x + outSign * forearmLen * 0.08,
-                            y: elbow.y + forearmLen * 0.90
-                        )
-                    }()
-                    let restDx: CGFloat = wrist.x - (hasForearm ? elbow.x : side.shoulderStage.x)
-                    let restDy: CGFloat = wrist.y - (hasForearm ? elbow.y : side.shoulderStage.y)
-                    let restHandAngle: CGFloat = atan2(restDy, restDx) + .pi * 0.5
-                    return (elbow, wrist, restHandAngle, 1.0, 1.0)
+                    return (side.shoulderStage, restElbow, restWrist, restHandAngle, 1.0, 1.0)
                 }
             }()
 
@@ -2189,14 +2561,14 @@ public struct PuppetStageView: View {
             let wristStage: CGPoint
 
             if hasForearm {
-                let rawUpperVec = CGPoint(x: rawElbow.x - side.shoulderStage.x, y: rawElbow.y - side.shoulderStage.y)
+                let rawUpperVec = CGPoint(x: rawElbow.x - effShoulder.x, y: rawElbow.y - effShoulder.y)
                 let upperVecRot = rotateStageVec(rawUpperVec, by: torsoChainRotRad + upperChainRotRad)
-                upperStart = CGPoint(x: side.shoulderStage.x + upperOffStage.width, y: side.shoulderStage.y + upperOffStage.height)
+                upperStart = CGPoint(x: effShoulder.x + upperOffStage.width, y: effShoulder.y + upperOffStage.height)
                 upperEnd = CGPoint(x: upperStart.x + upperVecRot.x, y: upperStart.y + upperVecRot.y)
 
                 let elbowChildAnchor = followMove
                     ? upperEnd
-                    : CGPoint(x: side.shoulderStage.x + upperVecRot.x, y: side.shoulderStage.y + upperVecRot.y)
+                    : CGPoint(x: effShoulder.x + upperVecRot.x, y: effShoulder.y + upperVecRot.y)
 
                 let rawForeVec = CGPoint(x: rawWrist.x - rawElbow.x, y: rawWrist.y - rawElbow.y)
                 let foreVecRot = rotateStageVec(rawForeVec, by: torsoChainRotRad + upperChainRotRad + foreChainRotRad)
@@ -2208,21 +2580,17 @@ public struct PuppetStageView: View {
                     : CGPoint(x: elbowChildAnchor.x + foreVecRot.x, y: elbowChildAnchor.y + foreVecRot.y)
                 stagePins.append((foreStart, .orange))
             } else {
-                let rawArmVec = CGPoint(x: rawWrist.x - side.shoulderStage.x, y: rawWrist.y - side.shoulderStage.y)
+                let rawArmVec = CGPoint(x: rawWrist.x - effShoulder.x, y: rawWrist.y - effShoulder.y)
                 let armVecRot = rotateStageVec(rawArmVec, by: torsoChainRotRad + upperChainRotRad)
-                upperStart = CGPoint(x: side.shoulderStage.x + upperOffStage.width, y: side.shoulderStage.y + upperOffStage.height)
+                upperStart = CGPoint(x: effShoulder.x + upperOffStage.width, y: effShoulder.y + upperOffStage.height)
                 upperEnd = CGPoint(x: upperStart.x + armVecRot.x, y: upperStart.y + armVecRot.y)
-                foreStart = side.shoulderStage
+                foreStart = effShoulder
                 foreEnd = upperEnd
                 wristStage = followMove
                     ? upperEnd
-                    : CGPoint(x: side.shoulderStage.x + armVecRot.x, y: side.shoulderStage.y + armVecRot.y)
+                    : CGPoint(x: effShoulder.x + armVecRot.x, y: effShoulder.y + armVecRot.y)
             }
             stagePins.append((wristStage, .orange))
-
-            let palmFlipDirection: CGFloat = puppet.dynamicPalmFlip ? ((palmSign >= 0.0) ? 1.0 : -1.0) : 1.0
-            let palmPerspective: CGFloat = max(0.68, min(1.0, abs(palmSign) * 1.2))
-            let signedPalmFlipX: CGFloat = palmFlipDirection * palmPerspective
 
             if hasForearm {
                 if let upperPart = buildLimbSegmentPart(
@@ -2265,15 +2633,32 @@ public struct PuppetStageView: View {
                 }
             }
 
-            let hasHandDirect = (puppet.partImages[side.handSlot] != nil)
-            let handFallbackSlot: PuppetPartSlot = side.isLeft ? .rightHand : .leftHand
-            let hasHandFallback = (puppet.partImages[handFallbackSlot] != nil)
-            let hasAnyHand = (puppet.partEnabled[side.handSlot] != false) && (hasHandDirect || hasHandFallback)
+            let hasPalmDirect = (puppet.partImages[side.handSlot] != nil)
+            let palmFallbackSlot: PuppetPartSlot = side.isLeft ? .rightHand : .leftHand
+            let hasPalmFallback = (puppet.partImages[palmFallbackSlot] != nil)
+
+            let backSlot = side.handBackSlot
+            let backFallbackSlot: PuppetPartSlot = side.isLeft ? .rightHandBack : .leftHandBack
+            let hasBackDirect = (puppet.partEnabled[backSlot] != false && puppet.partImages[backSlot] != nil)
+            let hasBackFallback = (puppet.partEnabled[backSlot] != false && puppet.partImages[backFallbackSlot] != nil)
+            let hasAnyBackGraphic = hasBackDirect || hasBackFallback
+
+            let isEditingBackSlot = allowPartEditing && (puppet.selectedSlot == backSlot)
+            let useBackGraphic = hasAnyBackGraphic && (isEditingBackSlot || (puppet.dynamicPalmFlip && palmSign < -0.06))
+
+            let hasAnyHand = (puppet.partEnabled[side.handSlot] != false) && (useBackGraphic || hasPalmDirect || hasPalmFallback)
 
             if hasAnyHand {
-                let activeHandSlot = hasHandDirect ? side.handSlot : handFallbackSlot
+                let activeHandSlot: PuppetPartSlot = useBackGraphic
+                    ? (hasBackDirect ? backSlot : backFallbackSlot)
+                    : (hasPalmDirect ? side.handSlot : palmFallbackSlot)
+                let transformOwnerSlot: PuppetPartSlot = useBackGraphic ? backSlot : side.handSlot
+                let transformFallbackSlot: PuppetPartSlot = useBackGraphic ? backFallbackSlot : palmFallbackSlot
+                let needsHandMirror: Bool = useBackGraphic
+                    ? (!hasBackDirect && hasBackFallback)
+                    : (!hasPalmDirect && hasPalmFallback)
+
                 if let handImg = puppet.partImages[activeHandSlot] {
-                    let needsHandMirror = !hasHandDirect && hasHandFallback
                     let wristUV = puppet.pin(in: activeHandSlot, id: "wristPivot")
                     let knuckleUV = puppet.pin(in: activeHandSlot, id: "middleKnuckle")
                     let handAspect: CGFloat = handImg.size.width / max(1.0, handImg.size.height)
@@ -2283,7 +2668,7 @@ public struct PuppetStageView: View {
                     let pinDy: CGFloat = (knuckleUV.y - wristUV.y) * baseHandH
                     let intrinsicHandAngle: CGFloat = (hypot(pinDx, pinDy) > 1.0) ? atan2(pinDx, -pinDy) : 0.0
 
-                    let handXf = resolvedMirrorTransform(slot: side.handSlot, fallbackSlot: handFallbackSlot, needsMirror: needsHandMirror)
+                    let handXf = resolvedMirrorTransform(slot: transformOwnerSlot, fallbackSlot: transformFallbackSlot, needsMirror: needsHandMirror)
                     let finalHandW: CGFloat = baseHandW * handXf.width
                     let finalHandH: CGFloat = baseHandH * handXf.height
                     let partRotRad: CGFloat = CGFloat(handXf.rotDeg * .pi / 180.0)
@@ -2295,27 +2680,30 @@ public struct PuppetStageView: View {
                     }()
                     let curlSquashY: CGFloat = 1.0 - (avgCurl * 0.16)
 
-                    // Effective hand orientation:
-                    // If thumb is extended independently (e.g. thumbs up or pointing gesture), blend towards thumb vector
-                    let effectiveHandAngle: CGFloat = {
-                        guard let hand = trackedHand else { return rawHandAngle }
-                        let thumbCurl = hand.fingerCurls.first ?? 0.0
-                        let indexCurl = hand.fingerCurls.count > 1 ? hand.fingerCurls[1] : 0.0
-                        if thumbCurl < 0.35 && indexCurl > 0.65 {
-                            return CGFloat(hand.thumbAngle)
-                        }
-                        return rawHandAngle
-                    }()
+                    // Keep hand aligned with true wrist-to-finger axis; palm/back orientation swaps sprite or mirrors across finger axis!
+                    let effectiveHandAngle: CGFloat = rawHandAngle
 
-                    let hOff = puppet.partOffset(for: side.handSlot)
+                    let hOff = puppet.partOffset(for: transformOwnerSlot)
                     let handPivotPt = CGPoint(x: wristStage.x + hOff.width * offsetUnit, y: wristStage.y + hOff.height * offsetUnit)
-                    let totalHandRot: CGFloat = effectiveHandAngle + partRotRad - intrinsicHandAngle
+                    let worldHandRot: CGFloat = effectiveHandAngle + partRotRad
                     let defaultHandSignX: CGFloat = needsHandMirror ? -1.0 : 1.0
-                    let finalFlipX: CGFloat = defaultHandSignX * signedPalmFlipX * flipH
 
-                    let xfData = makeAnchoredTransform(
+                    // When dedicated back-of-hand graphic is used, keep its natural orientation; otherwise mirror across finger axis!
+                    let resolvedPalmFlipX: CGFloat = {
+                        guard puppet.dynamicPalmFlip else { return 1.0 }
+                        let persp = max(0.72, min(1.0, abs(palmSign) * 1.25))
+                        if useBackGraphic {
+                            return persp
+                        }
+                        let dir: CGFloat = (palmSign >= -0.06) ? 1.0 : -1.0
+                        return dir * persp
+                    }()
+                    let finalFlipX: CGFloat = defaultHandSignX * resolvedPalmFlipX * flipH
+
+                    let xfData = makeHandAnchoredTransform(
                         pivotStage: handPivotPt,
-                        rotationRad: totalHandRot,
+                        worldRotationRad: worldHandRot,
+                        intrinsicRotationRad: intrinsicHandAngle,
                         flipX: finalFlipX,
                         flipY: flipV * curlSquashY,
                         pivotUV: wristUV,
@@ -2323,8 +2711,9 @@ public struct PuppetStageView: View {
                         height: finalHandH
                     )
                     let drawRect = CGRect(x: 0, y: 0, width: finalHandW, height: finalHandH)
+                    let interactiveSlot: PuppetPartSlot = isEditingBackSlot ? backSlot : side.handSlot
                     partsBySlot[side.handSlot] = PlacedStagePart(
-                        slot: side.handSlot,
+                        slot: interactiveSlot,
                         image: handImg,
                         localBounds: drawRect,
                         localToStage: xfData.localToStage,
@@ -2424,22 +2813,31 @@ public struct PuppetStageView: View {
         let ptPlus = CGPoint(x: shoulder.x + cos(anglePlus) * len1, y: shoulder.y + sin(anglePlus) * len1)
         let ptMinus = CGPoint(x: shoulder.x + cos(angleMinus) * len1, y: shoulder.y + sin(angleMinus) * len1)
 
-        // If Apple Vision body pose tracks the user's real shoulder and elbow, choose the IK solution
-        // that matches the user's actual physical elbow direction (e.g. raised high, bent outward, or down)!
-        if let pS = poseShoulder, let pE = poseElbow, hypot(pE.x - pS.x, pE.y - pS.y) > 12.0 {
+        // Continuous Anatomical Human Elbow Pole Vector:
+        // Gravity (+Y down) + Outward lateral away from ribs/head prevents inverted upward chicken-wing twists!
+        let outSign: CGFloat = isLeftArm ? -1.0 : 1.0
+        let clampedWrist = CGPoint(x: shoulder.x + cos(baseAngle) * d, y: shoulder.y + sin(baseAngle) * d)
+        let midPt = CGPoint(x: (shoulder.x + clampedWrist.x) * 0.5, y: (shoulder.y + clampedWrist.y) * 0.5)
+        let poleDir = CGPoint(x: outSign * 0.68, y: 1.0)
+        let poleDotPlus = (ptPlus.x - midPt.x) * poleDir.x + (ptPlus.y - midPt.y) * poleDir.y
+        let poleDotMinus = (ptMinus.x - midPt.x) * poleDir.x + (ptMinus.y - midPt.y) * poleDir.y
+        let anatomicalChoice = (poleDotPlus >= poleDotMinus) ? ptPlus : ptMinus
+
+        // If Apple Vision body pose tracks the user's real shoulder and elbow, match it unless it's a noisy chicken-wing flip
+        if let pS = poseShoulder, let pE = poseElbow, hypot(pE.x - pS.x, pE.y - pS.y) > 14.0 {
             let trackDirX = pE.x - pS.x
             let trackDirY = pE.y - pS.y
+            let anatomyWeight = CGFloat(puppet.humanAnatomyConstraints)
+            let isImpossibleChickenWing = (trackDirY < -abs(trackDirX) * 0.35) || (outSign * trackDirX < -24.0 && trackDirY < 0)
+            if isImpossibleChickenWing && anatomyWeight > 0.35 {
+                return anatomicalChoice
+            }
             let dotPlus = (ptPlus.x - shoulder.x) * trackDirX + (ptPlus.y - shoulder.y) * trackDirY
             let dotMinus = (ptMinus.x - shoulder.x) * trackDirX + (ptMinus.y - shoulder.y) * trackDirY
             return (dotPlus >= dotMinus) ? ptPlus : ptMinus
         }
 
-        // Default: choose whichever elbow points naturally outward and away from the body / head
-        let outSign: CGFloat = isLeftArm ? -1.0 : 1.0
-        let isRaised = dy < 0
-        let scorePlus = outSign * (ptPlus.x - shoulder.x) - (isRaised ? (ptPlus.y - shoulder.y) * 0.45 : 0.0)
-        let scoreMinus = outSign * (ptMinus.x - shoulder.x) - (isRaised ? (ptMinus.y - shoulder.y) * 0.45 : 0.0)
-        return (scorePlus >= scoreMinus) ? ptPlus : ptMinus
+        return anatomicalChoice
     }
 
     private func drawStagePin(context: inout GraphicsContext, at pt: CGPoint, color: Color) {
@@ -2454,12 +2852,14 @@ public struct PuppetStageView: View {
 public struct PuppetStudioView: View {
     @ObservedObject public var puppet: PuppetController
     @ObservedObject public var tracker: HolisticTracker
+    public var ndiSender: NDISenderService? = nil
     public var onOpenFullStage: (() -> Void)? = nil
     @State private var sidebarTab: Int = 0 // 0: Rigging Pins, 1: Sprites & Depth, 2: Proportions
 
-    public init(puppet: PuppetController, tracker: HolisticTracker, onOpenFullStage: (() -> Void)? = nil) {
+    public init(puppet: PuppetController, tracker: HolisticTracker, ndiSender: NDISenderService? = nil, onOpenFullStage: (() -> Void)? = nil) {
         self.puppet = puppet
         self.tracker = tracker
+        self.ndiSender = ndiSender
         self.onOpenFullStage = onOpenFullStage
     }
 
@@ -2474,12 +2874,16 @@ public struct PuppetStudioView: View {
             HStack(alignment: .top, spacing: 16) {
                 // Main Hero: Live Puppet Stage + Camera Mini-Feed
                 VStack(alignment: .leading, spacing: 12) {
-                    PuppetStageView(
+                        PuppetStageView(
                         puppet: puppet,
                         frame: tracker.latestFrame,
                         isCalibrated: tracker.calibrationBaseline.isCalibrated,
                         onCalibrate: { tracker.calibrateNeutralFace() },
-                        onToggleFullStage: onOpenFullStage
+                        onToggleFullStage: onOpenFullStage,
+                        calibrationBaseline: tracker.calibrationBaseline,
+                        calibrationCountdown: tracker.calibrationCountdown,
+                        onCountdownCalibrate: { tracker.startCountdownCalibration(seconds: 3) },
+                        ndiSender: ndiSender
                     )
 
                     HStack(spacing: 12) {
@@ -2487,7 +2891,16 @@ public struct PuppetStudioView: View {
                             session: tracker.captureSession,
                             frame: tracker.latestFrame,
                             mirror: tracker.settings.mirror,
-                            isRunning: tracker.isRunning
+                            isRunning: tracker.isRunning,
+                            inputSource: tracker.inputSource,
+                            mediaImage: tracker.mediaPreviewImage,
+                            mediaFileName: tracker.mediaFileName,
+                            isMediaPlaying: tracker.isMediaPlaying,
+                            calibrationCountdown: tracker.calibrationCountdown,
+                            onSelectLiveCamera: { tracker.switchToLiveCamera() },
+                            onLoadVideo: { tracker.promptAndLoadVideoFile() },
+                            onLoadPhoto: { tracker.promptAndLoadStillImage() },
+                            onTogglePlayPause: { tracker.toggleMediaPlayback() }
                         )
                         .frame(width: 240)
 
@@ -2523,15 +2936,25 @@ public struct PuppetStudioView: View {
                 .frame(width: 380)
             }
         }
-        .sheet(isPresented: $puppet.showSheetImporter) {
-            PuppetSheetImporterModal(puppet: puppet)
-        }
     }
 
     // MARK: - Studio Top Toolbar (Preset Switcher + Undo / Redo + Reset)
 
     private var studioTopActionRow: some View {
         HStack(spacing: 10) {
+            // New Puppet Button (⌘N)
+            Button {
+                puppet.showNewPuppetModal = true
+            } label: {
+                Label("New Puppet…", systemImage: "plus.circle.fill")
+                    .font(.system(size: 11.5, weight: .bold))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.purple)
+            .controlSize(.small)
+            .keyboardShortcut("n", modifiers: .command)
+            .help("Create a new character from PSD, sprite sheet, or blank rig (⌘N)")
+
             HStack(spacing: 6) {
                 Image(systemName: "theatermasks.fill")
                     .font(.system(size: 13))
@@ -2550,7 +2973,7 @@ public struct PuppetStudioView: View {
                 .frame(height: 18)
                 .overlay(Color.white.opacity(0.12))
 
-            // Undo & Redo Buttons with standard Cmd+Z / Cmd+Shift+Z shortcuts
+            // Undo & Redo Buttons (keyboard shortcuts handled globally via Edit menu CommandGroup)
             Button {
                 puppet.undo()
             } label: {
@@ -2560,8 +2983,7 @@ public struct PuppetStudioView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!puppet.canUndo)
-            .keyboardShortcut("z", modifiers: .command)
-            .help("Undo last pin move or graphic change (⌘Z)")
+            .help("Undo last edit (⌘Z)")
 
             Button {
                 puppet.redo()
@@ -2572,8 +2994,7 @@ public struct PuppetStudioView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!puppet.canRedo)
-            .keyboardShortcut("z", modifiers: [.command, .shift])
-            .help("Redo (⇧⌘Z)")
+            .help("Redo last undone edit (⇧⌘Z)")
 
             // Save Character Package Button (Pops up dialog to name & save character)
             Button {
@@ -2628,6 +3049,17 @@ public struct PuppetStudioView: View {
             .controlSize(.small)
             .fixedSize()
             .help("Click to export/import full character packages or rig coordinates.")
+
+            Button {
+                puppet.showPSDImporter = true
+            } label: {
+                Label("Import PSD…", systemImage: "photo.stack.fill")
+                    .font(.system(size: 11.5, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+            .controlSize(.small)
+            .help("Import layered Photoshop / Procreate PSD character (⇧⌘I)")
 
             Button {
                 puppet.showSheetImporter = true
@@ -3132,7 +3564,10 @@ public struct PuppetStudioView: View {
                         get: { puppet.partWidthScale[slot] ?? 1.0 },
                         set: { puppet.setPartWidth($0, for: slot) }
                     ),
-                    in: 0.25...3.00
+                    in: 0.25...3.00,
+                    onEditingChanged: { editing in
+                        if editing { puppet.recordUndoSnapshot() }
+                    }
                 )
                 .controlSize(.mini)
                 ScrubbableFloatBadge(
@@ -3167,7 +3602,10 @@ public struct PuppetStudioView: View {
                         get: { puppet.partHeightScale[slot] ?? 1.0 },
                         set: { puppet.setPartHeight($0, for: slot) }
                     ),
-                    in: 0.25...3.00
+                    in: 0.25...3.00,
+                    onEditingChanged: { editing in
+                        if editing { puppet.recordUndoSnapshot() }
+                    }
                 )
                 .controlSize(.mini)
                 ScrubbableFloatBadge(
@@ -3202,7 +3640,10 @@ public struct PuppetStudioView: View {
                         get: { puppet.partRotationOffset[slot] ?? 0.0 },
                         set: { puppet.setPartRotationDegrees($0, for: slot) }
                     ),
-                    in: -180.0...180.0
+                    in: -180.0...180.0,
+                    onEditingChanged: { editing in
+                        if editing { puppet.recordUndoSnapshot() }
+                    }
                 )
                 .controlSize(.mini)
                 ScrubbableFloatBadge(
@@ -3383,15 +3824,16 @@ public struct PuppetStudioView: View {
                 Spacer()
             }
 
-            PuppetSliderRow(label: "CHARACTER SCALE", value: $puppet.characterScale, range: 0.20...0.65)
-            PuppetSliderRow(label: "HAND SCALE (ZOOM)", value: $puppet.handScale, range: 0.08...0.45)
-            PuppetSliderRow(label: "ARM LENGTH (EXTEND / SHORTEN)", value: $puppet.armLengthScale, range: 0.40...1.80)
-            PuppetSliderRow(label: "ARM WIDTH (SLIM / WIDE)", value: $puppet.armThicknessScale, range: 0.30...1.60)
-            PuppetSliderRow(label: "LEG LENGTH (EXTEND / SHORTEN)", value: $puppet.legLengthScale, range: 0.40...1.80)
-            PuppetSliderRow(label: "LEG WIDTH (SLIM / WIDE)", value: $puppet.legThicknessScale, range: 0.30...1.60)
-            PuppetSliderRow(label: "EYE SPRITE SCALE", value: $puppet.eyeSpriteScale, range: 0.50...1.80)
-            PuppetSliderRow(label: "NOSE SPRITE SCALE", value: $puppet.noseSpriteScale, range: 0.50...1.80)
-            PuppetSliderRow(label: "MOUTH SPRITE SCALE", value: $puppet.mouthSpriteScale, range: 0.50...1.80)
+            PuppetSliderRow(label: "CHARACTER SCALE", value: $puppet.characterScale, range: 0.15...0.65, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "HAND SCALE (ZOOM)", value: $puppet.handScale, range: 0.04...0.45, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "ARM LENGTH (EXTEND / SHORTEN)", value: $puppet.armLengthScale, range: 0.40...1.80, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "HAND-LED REACH / EXAGGERATION", value: $puppet.armReachExaggeration, range: 0.0...2.0, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "ARM WIDTH (SLIM / WIDE)", value: $puppet.armThicknessScale, range: 0.30...1.60, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "LEG LENGTH (EXTEND / SHORTEN)", value: $puppet.legLengthScale, range: 0.40...1.80, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "LEG WIDTH (SLIM / WIDE)", value: $puppet.legThicknessScale, range: 0.30...1.60, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "EYE SPRITE SCALE", value: $puppet.eyeSpriteScale, range: 0.30...2.20, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "NOSE SPRITE SCALE", value: $puppet.noseSpriteScale, range: 0.30...2.20, onBeginEdit: { puppet.recordUndoSnapshot() })
+            PuppetSliderRow(label: "MOUTH SPRITE SCALE", value: $puppet.mouthSpriteScale, range: 0.30...2.20, onBeginEdit: { puppet.recordUndoSnapshot() })
             PuppetSliderRow(label: "HEAD POSITION FOLLOW", value: $puppet.headMoveAmount, range: 0...2.5)
             PuppetSliderRow(label: "HEAD TILT (ROLL)", value: $puppet.headTiltAmount, range: 0...2.0)
             PuppetSliderRow(label: "2.5D HEAD TURN PARALLAX", value: $puppet.headTurnParallax, range: 0...2.5)
@@ -3524,6 +3966,8 @@ public struct PuppetPinEditorCanvas: View {
     @State private var selectedPinId: String? = nil
     @State private var didRecordDragUndo: Bool = false
     @State private var didRecordNudgeUndo: Bool = false
+    @State private var dragStartPartWidth: Double? = nil
+    @State private var didRecordRotHandleUndo: Bool = false
     @State private var isDropTargeted: Bool = false
     @State private var editorZoom: CGFloat = 1.0
     @State private var editorPan: CGSize = .zero
@@ -3877,10 +4321,17 @@ public struct PuppetPinEditorCanvas: View {
         .gesture(
             DragGesture()
                 .onChanged { value in
+                    if dragStartPartWidth == nil {
+                        puppet.recordUndoSnapshot()
+                        dragStartPartWidth = Double(puppet.partWidth(for: slot))
+                    }
                     let baseW = max(10, drawRect.width)
                     let deltaScale = (value.translation.width / baseW) * 1.5
-                    let current = puppet.partWidth(for: slot)
-                    puppet.setPartWidth(max(0.3, min(2.5, current + deltaScale)), for: slot)
+                    let base = dragStartPartWidth ?? Double(puppet.partWidth(for: slot))
+                    puppet.setPartWidth(max(0.25, min(3.0, base + deltaScale)), for: slot)
+                }
+                .onEnded { _ in
+                    dragStartPartWidth = nil
                 }
         )
         .help("Drag horizontally to scale part width directly")
@@ -3904,13 +4355,23 @@ public struct PuppetPinEditorCanvas: View {
         .shadow(color: .black.opacity(0.5), radius: 4)
         .position(x: rx, y: ry)
         .onTapGesture(count: 2) {
-            puppet.setPartRotationDegrees(0.0, for: slot)
+            if abs(puppet.partRotationDegrees(for: slot)) > 0.01 {
+                puppet.recordUndoSnapshot()
+                puppet.setPartRotationDegrees(0.0, for: slot)
+            }
         }
         .gesture(
             DragGesture()
                 .onChanged { value in
+                    if !didRecordRotHandleUndo {
+                        puppet.recordUndoSnapshot()
+                        didRecordRotHandleUndo = true
+                    }
                     let angle = atan2(value.location.y - drawRect.midY, value.location.x - drawRect.midX) * 180.0 / .pi + 90.0
                     puppet.setPartRotationDegrees(angle, for: slot)
+                }
+                .onEnded { _ in
+                    didRecordRotHandleUndo = false
                 }
         )
         .help("Drag around center to rotate directly, double-click to reset to 0°")
@@ -4130,6 +4591,7 @@ private struct PuppetSliderRow: View {
     let label: String
     @Binding var value: Double
     let range: ClosedRange<Double>
+    var onBeginEdit: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -4141,9 +4603,11 @@ private struct PuppetSliderRow: View {
                 Text(String(format: "%.2f", value))
                     .font(.system(size: 10.5, design: .monospaced))
             }
-            Slider(value: $value, in: range)
-                .tint(.teal)
-                .controlSize(.small)
+            Slider(value: $value, in: range, onEditingChanged: { editing in
+                if editing { onBeginEdit?() }
+            })
+            .tint(.teal)
+            .controlSize(.small)
         }
     }
 }
@@ -4183,12 +4647,13 @@ private struct CheckerboardView: View {
     }
 }
 
-private struct PuppetSheetImporterModal: View {
-    @ObservedObject var puppet: PuppetController
+public struct PuppetSheetImporterModal: View {
+    @ObservedObject public var puppet: PuppetController
     @Environment(\.dismiss) private var dismiss
 
     @State private var rawSheetImage: NSImage? = nil
     @State private var processedSheetImage: NSImage? = nil
+    @State private var isUsingGeneratedExample: Bool = true
     @State private var islands: [PuppetSheetIsland] = []
     @State private var targetSlot: PuppetPartSlot = .leftUpperArm
     @State private var targetCategoryFilter: PuppetPartCategory? = nil
@@ -4212,7 +4677,11 @@ private struct PuppetSheetImporterModal: View {
     @State private var isAIPromptExpanded: Bool = false
     @State private var localKeyMonitor: Any? = nil
 
-    var body: some View {
+    public init(puppet: PuppetController) {
+        self.puppet = puppet
+    }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             modalHeader
 
@@ -4226,8 +4695,14 @@ private struct PuppetSheetImporterModal: View {
         .background(Color(red: 0.08, green: 0.09, blue: 0.12))
         .onAppear {
             targetSlot = puppet.selectedSlot
-            let sample = PuppetSheetSlicer.makeExamplePuppetSheet(from: puppet)
-            loadAndSlice(image: sample)
+            if let cached = puppet.cachedCustomSheetImage {
+                isUsingGeneratedExample = false
+                loadAndSlice(image: cached)
+            } else {
+                isUsingGeneratedExample = true
+                let sample = PuppetSheetSlicer.makeExamplePuppetSheet(from: puppet)
+                loadAndSlice(image: sample)
+            }
 
             // Local AppKit event monitor: handles Tab, Left/Right arrow, +, -, 0, Delete without alert beep!
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -4332,6 +4807,22 @@ private struct PuppetSheetImporterModal: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.teal)
                 .controlSize(.small)
+
+                if !isUsingGeneratedExample {
+                    Button {
+                        puppet.cachedCustomSheetImage = nil
+                        isUsingGeneratedExample = true
+                        let sample = PuppetSheetSlicer.makeExamplePuppetSheet(from: puppet)
+                        loadAndSlice(image: sample)
+                        statusMessage = "Showing current character parts sheet."
+                    } label: {
+                        Label("Current Character Sheet", systemImage: "person.crop.rectangle")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Switch back from external PNG sheet to the current character's parts")
+                }
 
                 Button {
                     exportAllPartsAsPNGs()
@@ -4630,14 +5121,24 @@ private struct PuppetSheetImporterModal: View {
         return Button {
             selectedIslandId = island.id
             mappedIslandSlots[island.id] = targetSlot.rawValue
-            puppet.assignCroppedSheetPart(
-                slot: targetSlot,
-                image: island.croppedImage,
-                name: "\(puppet.characterName)_\(targetSlot.rawValue)"
-            )
             let prevTitle = targetSlot.title
-            stepTargetSlot(delta: 1)
-            statusMessage = "Assigned Part #\(island.id) → \(prevTitle)! Next target: \(targetSlot.title)"
+            let centerNorm = CGPoint(x: island.normalizedRect.midX, y: island.normalizedRect.midY)
+            if isUsingGeneratedExample,
+               let srcSlot = PuppetSheetSlicer.sourceSlotInExampleSheet(at: centerNorm, in: puppet),
+               srcSlot != targetSlot {
+                // Copy the exact uncropped source sprite (preserving PSD union-box padding & 1:1 scale)!
+                puppet.copyPartGraphic(from: srcSlot, to: targetSlot)
+                stepTargetSlot(delta: 1)
+                statusMessage = "Copied exact \(srcSlot.title) graphic → \(prevTitle)! Next target: \(targetSlot.title)"
+            } else {
+                puppet.assignCroppedSheetPart(
+                    slot: targetSlot,
+                    image: island.croppedImage,
+                    name: "\(puppet.characterName)_\(targetSlot.rawValue)"
+                )
+                stepTargetSlot(delta: 1)
+                statusMessage = "Assigned Part #\(island.id) → \(prevTitle)! Next target: \(targetSlot.title)"
+            }
         } label: {
             ZStack(alignment: .topLeading) {
                 if showOutlines {
@@ -4919,6 +5420,8 @@ private struct PuppetSheetImporterModal: View {
         panel.allowsMultipleSelection = false
         panel.message = "Select a Paper Puppet Sheet image (PNG/JPG) with separated body parts"
         if panel.runModal() == .OK, let url = panel.url, let img = NSImage(contentsOf: url) {
+            puppet.cachedCustomSheetImage = img
+            isUsingGeneratedExample = false
             loadAndSlice(image: img)
             statusMessage = "Loaded '\(url.lastPathComponent)' — detected \(islands.count) separated body parts!"
         }
@@ -4945,5 +5448,960 @@ private struct PuppetSheetImporterModal: View {
             width: drawW,
             height: drawH
         )
+    }
+}
+
+// MARK: - New Puppet Modal (⌘N)
+
+public struct NewPuppetModal: View {
+    @ObservedObject public var puppet: PuppetController
+    @Environment(\.dismiss) private var dismiss
+
+    public init(puppet: PuppetController) {
+        self.puppet = puppet
+    }
+
+    public var body: some View {
+        VStack(spacing: 18) {
+            // Header
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(Color.cyan)
+                        Text("Create New Character")
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                    Text("Choose how you want to create or import your 2D puppet rig")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.bottom, 4)
+
+            // 3 Option Cards
+            VStack(spacing: 12) {
+                // Option 1: Import Layered Photoshop (.PSD)
+                Button {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        puppet.showPSDImporter = true
+                    }
+                } label: {
+                    HStack(spacing: 16) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(LinearGradient(colors: [Color.blue.opacity(0.4), Color.cyan.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 52, height: 52)
+                            Image(systemName: "photo.stack.fill")
+                                .font(.system(size: 24))
+                                .foregroundColor(.cyan)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("Import Layered Photoshop (.PSD)")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(.white)
+                                Text("Recommended")
+                                    .font(.system(size: 9.5, weight: .bold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.cyan.opacity(0.2))
+                                    .foregroundColor(.cyan)
+                                    .clipShape(Capsule())
+                            }
+                            Text("Loads multi-layered artwork (Photoshop / Procreate PSD). Auto-maps Finnish & English layer names to limbs, facial expressions, and derives joint pins.")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                // Option 2: Import Paper Puppet Sprite Sheet
+                Button {
+                    dismiss()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        puppet.showSheetImporter = true
+                    }
+                } label: {
+                    HStack(spacing: 16) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(LinearGradient(colors: [Color.teal.opacity(0.4), Color.green.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 52, height: 52)
+                            Image(systemName: "scissors")
+                                .font(.system(size: 24))
+                                .foregroundColor(.teal)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Import Paper Puppet Sprite Sheet")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                            Text("Loads a single image containing separated cut-out body parts on one canvas. Automatically isolates parts with background removal and marquee cropping.")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+
+                // Option 3: Start Blank Rig
+                Button {
+                    dismiss()
+                    puppet.resetToBlankPuppet(named: "New Character")
+                } label: {
+                    HStack(spacing: 16) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(LinearGradient(colors: [Color.purple.opacity(0.4), Color.indigo.opacity(0.3)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .frame(width: 52, height: 52)
+                            Image(systemName: "figure.arms.open")
+                                .font(.system(size: 24))
+                                .foregroundColor(.purple)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Start Blank Character Rig")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                            Text("Initializes a clean, symmetrical standard human skeleton ready for custom PNG part replacement and interactive rigging.")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(14)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+        }
+        .padding(22)
+        .frame(width: 580, height: 380)
+        .background(Color(red: 0.10, green: 0.11, blue: 0.14))
+    }
+}
+
+// MARK: - Photoshop Document (.PSD) Importer Modal
+
+public struct PuppetPSDImporterModal: View {
+    @ObservedObject public var puppet: PuppetController
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var currentFileURL: URL? = nil
+    @State private var canvasSize: CGSize = .zero
+    @State private var layers: [PSDLayer] = []
+    @State private var slotsByLayer: [UUID: Set<PuppetPartSlot>] = [:]
+    @State private var enabledMap: [UUID: Bool] = [:]
+    @State private var characterName: String = ""
+    @State private var errorMessage: String? = nil
+    @State private var isProcessing: Bool = false
+    @State private var searchFilter: String = ""
+    @State private var filterOnlyMapped: Bool = false
+    @State private var detectedProjectPSDURL: URL? = nil
+    @State private var isDropTargeted: Bool = false
+
+    public init(puppet: PuppetController) {
+        self.puppet = puppet
+    }
+
+    private func orderedSlots(_ set: Set<PuppetPartSlot>) -> [PuppetPartSlot] {
+        PuppetPartSlot.allCases.filter { set.contains($0) }
+    }
+
+    private var mappedCount: Int {
+        layers.filter { enabledMap[$0.id] == true && !(slotsByLayer[$0.id]?.isEmpty ?? true) }.count
+    }
+
+    private var mappedTargetSlotCount: Int {
+        var total = Set<PuppetPartSlot>()
+        for l in layers where enabledMap[l.id] == true {
+            if let assigned = slotsByLayer[l.id] {
+                total.formUnion(assigned)
+            }
+        }
+        return total.count
+    }
+
+    private var filteredLayers: [PSDLayer] {
+        layers.filter { layer in
+            let hasMapped = !(slotsByLayer[layer.id]?.isEmpty ?? true)
+            if filterOnlyMapped && (enabledMap[layer.id] != true || !hasMapped) {
+                return false
+            }
+            if !searchFilter.isEmpty {
+                let q = searchFilter.lowercased()
+                let matchName = layer.name.lowercased().contains(q)
+                let matchSlot = (slotsByLayer[layer.id] ?? []).contains { $0.title.lowercased().contains(q) }
+                return matchName || matchSlot
+            }
+            return true
+        }
+    }
+
+    public var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            modalHeader
+
+            if isProcessing {
+                VStack(spacing: 16) {
+                    Spacer()
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.cyan)
+                    Text("Decompressing PSD layers and analyzing geometry...")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if layers.isEmpty {
+                dropOrPickPromptArea
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    layerInspectionList
+                    rightSidebarPreview
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 1040, height: 720)
+        .background(Color(red: 0.08, green: 0.09, blue: 0.12))
+        .onAppear {
+            checkForProjectPSD()
+            restoreRememberedPSDIfAvailable()
+        }
+    }
+
+    // MARK: - Modal Header
+
+    private var modalHeader: some View {
+        HStack(alignment: .center) {
+            Image(systemName: "photo.stack.fill")
+                .font(.system(size: 22))
+                .foregroundStyle(Color.cyan)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 8) {
+                    Text("Photoshop Character Importer (.PSD)")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.white)
+                    if let url = currentFileURL {
+                        Text(url.lastPathComponent)
+                            .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Color.cyan.opacity(0.16))
+                            .foregroundColor(.cyan)
+                            .clipShape(Capsule())
+                    }
+                }
+                Text("Extracts layers from Photoshop / Procreate PSD, supports multi-slot sharing (1 layer → multiple visemes/parts), and remembers your PSD")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if !layers.isEmpty {
+                if let url = currentFileURL, FileManager.default.fileExists(atPath: url.path) {
+                    Button {
+                        loadPSD(from: url, restoreSavedMappings: true)
+                    } label: {
+                        Label("Reload PSD", systemImage: "arrow.clockwise")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Re-read pixel layers from disk while keeping your slot mappings")
+                }
+
+                Button {
+                    openPSDFilePanel()
+                } label: {
+                    Label("Open Different PSD…", systemImage: "folder")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Button {
+                syncCacheToPuppet(copyBackupToDisk: false)
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Initial Drop / Pick Prompt Area
+
+    private var dropOrPickPromptArea: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(Color.cyan.opacity(0.12))
+                        .frame(width: 84, height: 84)
+                    Image(systemName: "doc.viewfinder.fill")
+                        .font(.system(size: 38))
+                        .foregroundColor(.cyan)
+                }
+
+                VStack(spacing: 6) {
+                    Text("Select or Drop a Layered Photoshop Document")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.white)
+                    Text("Supports RGB 8-bit PSD files created in Photoshop or Procreate.\nAll non-empty pixel layers are automatically trimmed, mapped, and remembered for this puppet.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        openPSDFilePanel()
+                    } label: {
+                        Label("Choose PSD File…", systemImage: "folder.badge.plus")
+                            .font(.system(size: 12.5, weight: .semibold))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan)
+
+                    if let detectedURL = detectedProjectPSDURL {
+                        Button {
+                            loadPSD(from: detectedURL, restoreSavedMappings: false)
+                        } label: {
+                            Label("Load '\(detectedURL.lastPathComponent)'", systemImage: "bolt.fill")
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                        .help("Load PSD detected in project directory")
+                    }
+                }
+
+                if let err = errorMessage {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.red)
+                        Text(err)
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.red)
+                    }
+                    .padding(8)
+                    .background(Color.red.opacity(0.12))
+                    .cornerRadius(8)
+                }
+            }
+            .padding(40)
+            .frame(maxWidth: 680)
+            .background(Color.white.opacity(0.04))
+            .cornerRadius(16)
+            .overlay(
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(isDropTargeted ? Color.cyan : Color.white.opacity(0.12), lineWidth: isDropTargeted ? 2 : 1)
+            )
+            .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted) { providers in
+                guard let provider = providers.first else { return false }
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url = url, url.pathExtension.lowercased() == "psd" {
+                        DispatchQueue.main.async {
+                            loadPSD(from: url, restoreSavedMappings: false)
+                        }
+                    }
+                }
+                return true
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Layer Inspection List
+
+    private var layerInspectionList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Controls toolbar
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    TextField("Filter layers or slots…", text: $searchFilter)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.07))
+                .cornerRadius(6)
+                .frame(maxWidth: 220)
+
+                Toggle(isOn: $filterOnlyMapped) {
+                    Text("Mapped Only (\(mappedCount))")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .toggleStyle(.checkbox)
+
+                Spacer()
+
+                Button("Select All Mapped") {
+                    for l in layers {
+                        enabledMap[l.id] = !(slotsByLayer[l.id]?.isEmpty ?? true)
+                    }
+                    syncCacheToPuppet(copyBackupToDisk: false)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+
+                Button("Deselect All") {
+                    for l in layers {
+                        enabledMap[l.id] = false
+                    }
+                    syncCacheToPuppet(copyBackupToDisk: false)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            }
+
+            // Column Header
+            HStack(spacing: 12) {
+                Text("Use")
+                    .frame(width: 30, alignment: .center)
+                Text("Preview")
+                    .frame(width: 44, alignment: .center)
+                Text("Layer Name")
+                    .frame(width: 165, alignment: .leading)
+                Text("Dimensions")
+                    .frame(width: 86, alignment: .leading)
+                Text("Target Puppet Slot(s) — Check Multiple to Share Layer")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .font(.system(size: 10, weight: .bold))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.white.opacity(0.04))
+            .cornerRadius(6)
+
+            // Scrollable list
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 4) {
+                    ForEach(filteredLayers) { layer in
+                        layerRow(for: layer)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(12)
+        .background(Color.white.opacity(0.03))
+        .cornerRadius(10)
+    }
+
+    private func layerRow(for layer: PSDLayer) -> some View {
+        let isEnabled = enabledMap[layer.id] ?? false
+        let assignedList = orderedSlots(slotsByLayer[layer.id] ?? [])
+        let isAutoMatched = (layer.suggestedSlot != nil && assignedList.count == 1 && assignedList.first == layer.suggestedSlot)
+
+        return HStack(spacing: 12) {
+            Toggle("", isOn: Binding(
+                get: { self.enabledMap[layer.id] ?? false },
+                set: { newVal in
+                    self.enabledMap[layer.id] = newVal
+                    self.syncCacheToPuppet(copyBackupToDisk: false)
+                }
+            ))
+            .toggleStyle(.checkbox)
+            .frame(width: 30, alignment: .center)
+
+            // Thumbnail
+            ZStack {
+                CheckerboardView()
+                Image(nsImage: layer.image)
+                    .resizable()
+                    .scaledToFit()
+            }
+            .frame(width: 44, height: 44)
+            .cornerRadius(5)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+            )
+
+            // Layer Name
+            VStack(alignment: .leading, spacing: 2) {
+                Text(layer.name)
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(isEnabled ? .white : .secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 165, alignment: .leading)
+
+            // Dimensions
+            Text("\(Int(layer.trimmedFrame.width)) × \(Int(layer.trimmedFrame.height))")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: 86, alignment: .leading)
+
+            // Multi-Slot Target Menu (allows 1 PSD layer to populate multiple slots, e.g. Mouth Ah + Mouth Oh!)
+            Menu {
+                if !assignedList.isEmpty {
+                    ForEach(assignedList) { activeSlot in
+                        Button {
+                            toggleSlotAssignment(layer: layer, slot: activeSlot)
+                        } label: {
+                            Label("Unassign \(activeSlot.title)", systemImage: "checkmark.circle.fill")
+                        }
+                    }
+                    Divider()
+                }
+
+                Button("— Clear All Assignments (Skip) —") {
+                    slotsByLayer[layer.id] = []
+                    enabledMap[layer.id] = false
+                    syncCacheToPuppet(copyBackupToDisk: false)
+                }
+
+                Divider()
+
+                Menu("Head & Facial Features") {
+                    slotOptionButton(layer: layer, slot: .head)
+                    slotOptionButton(layer: layer, slot: .eyesOpen)
+                    slotOptionButton(layer: layer, slot: .eyesClosed)
+                    slotOptionButton(layer: layer, slot: .rightEyeOpen)
+                    slotOptionButton(layer: layer, slot: .rightEyeClosed)
+                    slotOptionButton(layer: layer, slot: .browsOverlay)
+                    slotOptionButton(layer: layer, slot: .rightBrows)
+                    slotOptionButton(layer: layer, slot: .noseOverlay)
+                    slotOptionButton(layer: layer, slot: .mouthNeutral)
+                    slotOptionButton(layer: layer, slot: .mouthSmile)
+                    slotOptionButton(layer: layer, slot: .mouthAh)
+                    slotOptionButton(layer: layer, slot: .mouthOh)
+                }
+
+                Menu("Upper Body, Arms & Back-of-Hand") {
+                    slotOptionButton(layer: layer, slot: .torso)
+                    slotOptionButton(layer: layer, slot: .leftUpperArm)
+                    slotOptionButton(layer: layer, slot: .leftForearm)
+                    slotOptionButton(layer: layer, slot: .leftHand)
+                    slotOptionButton(layer: layer, slot: .leftHandBack)
+                    slotOptionButton(layer: layer, slot: .rightUpperArm)
+                    slotOptionButton(layer: layer, slot: .rightForearm)
+                    slotOptionButton(layer: layer, slot: .rightHand)
+                    slotOptionButton(layer: layer, slot: .rightHandBack)
+                }
+
+                Menu("Pelvis, Tail & Legs") {
+                    slotOptionButton(layer: layer, slot: .pelvis)
+                    slotOptionButton(layer: layer, slot: .tail)
+                    slotOptionButton(layer: layer, slot: .leftThigh)
+                    slotOptionButton(layer: layer, slot: .leftShin)
+                    slotOptionButton(layer: layer, slot: .leftFoot)
+                    slotOptionButton(layer: layer, slot: .rightThigh)
+                    slotOptionButton(layer: layer, slot: .rightShin)
+                    slotOptionButton(layer: layer, slot: .rightFoot)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if !assignedList.isEmpty {
+                        Text(assignedList.map(\.title).joined(separator: " + "))
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.cyan)
+                            .lineLimit(1)
+                        if assignedList.count > 1 {
+                            Text("×\(assignedList.count)")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.teal.opacity(0.25))
+                                .foregroundColor(.teal)
+                                .cornerRadius(3)
+                        } else if isAutoMatched {
+                            Text("Matched")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.cyan.opacity(0.2))
+                                .foregroundColor(.cyan)
+                                .cornerRadius(3)
+                        }
+                    } else {
+                        Text("— Select Slot(s) —")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(!assignedList.isEmpty ? 0.08 : 0.04))
+                .cornerRadius(6)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(isEnabled ? Color.white.opacity(0.04) : Color.clear)
+        .cornerRadius(6)
+    }
+
+    private func toggleSlotAssignment(layer: PSDLayer, slot: PuppetPartSlot) {
+        var current = slotsByLayer[layer.id] ?? []
+        if current.contains(slot) {
+            current.remove(slot)
+            slotsByLayer[layer.id] = current
+            if current.isEmpty {
+                enabledMap[layer.id] = false
+            }
+        } else {
+            current.insert(slot)
+            slotsByLayer[layer.id] = current
+            enabledMap[layer.id] = true
+        }
+        syncCacheToPuppet(copyBackupToDisk: false)
+    }
+
+    private func slotOptionButton(layer: PSDLayer, slot: PuppetPartSlot) -> some View {
+        let isAssigned = slotsByLayer[layer.id]?.contains(slot) == true
+        return Button {
+            toggleSlotAssignment(layer: layer, slot: slot)
+        } label: {
+            HStack {
+                Text(slot.title)
+                if isAssigned {
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+    }
+
+    // MARK: - Right Sidebar Summary & Assembly
+
+    private var rightSidebarPreview: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Document details card
+            VStack(alignment: .leading, spacing: 8) {
+                Text("CHARACTER IDENTITY")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+
+                TextField("Character Name", text: $characterName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .semibold))
+                    .padding(8)
+                    .background(Color.white.opacity(0.07))
+                    .cornerRadius(6)
+
+                Divider()
+                    .overlay(Color.white.opacity(0.08))
+
+                HStack {
+                    Text("Canvas Size")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(Int(canvasSize.width)) × \(Int(canvasSize.height)) px")
+                        .foregroundColor(.white)
+                }
+                .font(.system(size: 11))
+
+                HStack {
+                    Text("Extracted Layers")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(layers.count)")
+                        .foregroundColor(.white)
+                }
+                .font(.system(size: 11))
+
+                HStack {
+                    Text("Active Layers → Slots")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text("\(mappedCount) layers → \(mappedTargetSlotCount) slots")
+                        .fontWeight(.semibold)
+                        .foregroundColor(mappedTargetSlotCount > 0 ? .cyan : .secondary)
+                }
+                .font(.system(size: 11))
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.04))
+            .cornerRadius(8)
+
+            // Anatomical Pin Derivation Info
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
+                        .font(.system(size: 12))
+                        .foregroundColor(.cyan)
+                    Text("Multi-Slot & Back-of-Hand Ready")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white)
+                }
+
+                Text("You can check multiple target slots on a single PSD layer (e.g. assigning one open mouth layer to both Mouth Ah and Mouth Oh). Back-of-hand layers (Kämmenselkä) automatically swap in when Dynamic Palm Flip is active.")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .lineSpacing(2)
+            }
+            .padding(12)
+            .background(Color.cyan.opacity(0.06))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.cyan.opacity(0.2), lineWidth: 1)
+            )
+
+            Spacer()
+
+            // Action Buttons
+            VStack(spacing: 8) {
+                Button {
+                    assembleCharacter()
+                } label: {
+                    HStack {
+                        Spacer()
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("Assemble & Rig Character (\(mappedTargetSlotCount) Slots)")
+                            .font(.system(size: 12.5, weight: .bold))
+                        Spacer()
+                    }
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.cyan)
+                .disabled(mappedTargetSlotCount == 0)
+
+                Button("Close") {
+                    syncCacheToPuppet(copyBackupToDisk: false)
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .frame(width: 290)
+    }
+
+    // MARK: - Actions & Helpers
+
+    private func syncCacheToPuppet(copyBackupToDisk: Bool) {
+        guard !layers.isEmpty else { return }
+        puppet.rememberPSDState(
+            url: currentFileURL,
+            canvasSize: canvasSize,
+            layers: layers,
+            slotsByLayer: slotsByLayer,
+            enabledByLayer: enabledMap,
+            copyBackupToDisk: copyBackupToDisk
+        )
+    }
+
+    private func restoreRememberedPSDIfAvailable() {
+        if !puppet.cachedPSDLayers.isEmpty {
+            currentFileURL = puppet.cachedPSDURL
+            canvasSize = puppet.cachedPSDCanvasSize
+            layers = puppet.cachedPSDLayers
+            slotsByLayer = puppet.cachedPSDSlotsByLayer
+            enabledMap = puppet.cachedPSDEnabledByLayer
+            characterName = puppet.characterName
+            return
+        }
+        if let rememberedURL = puppet.resolvedRememberedPSDURL() {
+            loadPSD(from: rememberedURL, restoreSavedMappings: true)
+        }
+    }
+
+    private func checkForProjectPSD() {
+        let fileManager = FileManager.default
+        let currentDir = fileManager.currentDirectoryPath
+
+        let candidatePaths = [
+            "\(currentDir)/Maskotti_Revontulikettu.psd",
+            "\(currentDir)/Maskotti_testi_Aurora_Alert.psd",
+            URL(fileURLWithPath: currentDir).deletingLastPathComponent().appendingPathComponent("Maskotti_Revontulikettu.psd").path
+        ]
+
+        for p in candidatePaths {
+            if fileManager.fileExists(atPath: p) {
+                detectedProjectPSDURL = URL(fileURLWithPath: p)
+                break
+            }
+        }
+    }
+
+    private func openPSDFilePanel() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "psd") ?? .data
+        ]
+        panel.allowsMultipleSelection = false
+        panel.message = "Select a layered Photoshop Document (.PSD) for character rigging"
+        if panel.runModal() == .OK, let url = panel.url {
+            loadPSD(from: url, restoreSavedMappings: false)
+        }
+    }
+
+    private func loadPSD(from url: URL, restoreSavedMappings: Bool) {
+        isProcessing = true
+        errorMessage = nil
+        let savedSlotsByKey = puppet.savedPSDSlotsByLayerKey
+        let savedEnabledByKey = puppet.savedPSDEnabledByLayerKey
+        let existingCharName = puppet.characterName
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
+            do {
+                let parsed = try PSDParser.parse(fileURL: url)
+                var initialSlotsByLayer: [UUID: Set<PuppetPartSlot>] = [:]
+                var initialEnabledMap: [UUID: Bool] = [:]
+
+                for l in parsed.layers {
+                    let key = PuppetController.psdLayerKey(l)
+                    if restoreSavedMappings, let savedRaw = savedSlotsByKey[key] {
+                        let restoredSet = Set(savedRaw.compactMap { PuppetPartSlot(rawValue: $0) })
+                        initialSlotsByLayer[l.id] = restoredSet
+                        initialEnabledMap[l.id] = savedEnabledByKey[key] ?? !restoredSet.isEmpty
+                    } else if restoreSavedMappings, let savedEnabled = savedEnabledByKey[key] {
+                        if let s = l.suggestedSlot {
+                            initialSlotsByLayer[l.id] = [s]
+                        }
+                        initialEnabledMap[l.id] = savedEnabled
+                    } else if let s = l.suggestedSlot {
+                        initialSlotsByLayer[l.id] = [s]
+                        initialEnabledMap[l.id] = l.isSelected
+                    } else {
+                        initialEnabledMap[l.id] = false
+                    }
+                }
+
+                let cleanedName: String = {
+                    if restoreSavedMappings && !existingCharName.isEmpty && existingCharName != "Character" {
+                        return existingCharName
+                    }
+                    let raw = url.deletingPathExtension().lastPathComponent
+                    if raw == "last_imported" && !existingCharName.isEmpty {
+                        return existingCharName
+                    }
+                    return raw
+                        .replacingOccurrences(of: "_", with: " ")
+                        .replacingOccurrences(of: "-", with: " ")
+                }()
+
+                DispatchQueue.main.async {
+                    self.currentFileURL = url
+                    self.canvasSize = parsed.canvasSize
+                    self.layers = parsed.layers
+                    self.slotsByLayer = initialSlotsByLayer
+                    self.enabledMap = initialEnabledMap
+                    self.characterName = cleanedName
+                    self.isProcessing = false
+                    self.puppet.rememberPSDState(
+                        url: url,
+                        canvasSize: parsed.canvasSize,
+                        layers: parsed.layers,
+                        slotsByLayer: initialSlotsByLayer,
+                        enabledByLayer: initialEnabledMap,
+                        copyBackupToDisk: !restoreSavedMappings
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    private func assembleCharacter() {
+        let activeLayers = layers.filter { enabledMap[$0.id] == true }
+        PSDParser.assemblePuppet(
+            into: puppet,
+            characterName: characterName.isEmpty ? "Imported Character" : characterName,
+            layers: activeLayers,
+            slotsByLayer: slotsByLayer
+        )
+        puppet.rememberPSDState(
+            url: currentFileURL,
+            canvasSize: canvasSize,
+            layers: layers,
+            slotsByLayer: slotsByLayer,
+            enabledByLayer: enabledMap,
+            copyBackupToDisk: true
+        )
+        puppet.saveCurrentPresetState(immediate: true)
+        dismiss()
     }
 }

@@ -1,9 +1,9 @@
-# HandOSC Native & 2D Puppet Studio — Agent Instructions & Context
+# Puppet Studio (Native macOS Swift & 2D Animation Rig) — Agent Instructions & Context
 
 ## Workspace Overview & Targets
 * **Repository Root**: `/Users/tknuutil/HandBodyFaceOSCsource`
 * **Primary Active Target**: `macos-native/` — zero-dependency native macOS app (Swift / SwiftUI / Apple Vision Neural Engine / AVFoundation / UDP OSC).
-  * Build & Launch: `./macos-native/build-app.sh` -> creates and opens `macos-native/build/HandOSC Native.app`.
+  * Build & Launch: `./macos-native/build-app.sh` -> creates and opens `macos-native/build/Puppet Studio.app` (symlinked also as `HandOSC Native.app`).
 * **Secondary Target**: `electron/` & `src/` — React 19 / Vite / MediaPipe cross-platform desktop app for PC/Windows.
 
 ## Architectural & Technical Invariants

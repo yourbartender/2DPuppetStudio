@@ -1,6 +1,6 @@
-# HandOSC & 2D Puppet Studio
+# Puppet Studio (2D Character Rigging & Live Motion Capture)
 
-A multi-modal motion tracking, real-time 2D puppet animation, and OSC (Open Sound Control) broadcasting suite. Available as a **high-performance native macOS Swift application** (`macos-native/`) leveraging the Apple Neural Engine (`Vision` + `AVFoundation`), and as a **cross-platform desktop and web application** (`electron/`, `src/`) powered by Google MediaPipe Vision.
+A high-performance 2D character rigging, live AI motion capture, and OSC (Open Sound Control) broadcasting suite. Available as a **high-performance native macOS Swift application** (`macos-native/`) leveraging the Apple Neural Engine (`Vision` + `AVFoundation`), and as a **cross-platform desktop and web application** (`electron/`, `src/`) powered by Google MediaPipe Vision.
 
 ---
 
@@ -9,12 +9,13 @@ A multi-modal motion tracking, real-time 2D puppet animation, and OSC (Open Soun
 * **`macos-native/` — Primary Native macOS Application (Swift & SwiftUI)**:
   * Zero external dependencies — pure Swift, AppKit, SwiftUI, AVFoundation, and Apple Vision.
   * Direct Apple Neural Engine hardware acceleration for sub-millisecond hand, pose, and face inference.
-  * Full-featured **2D Puppet Studio** with Paper Puppet Sheet auto-slicing, 3-part limb rigging, 2-bone Inverse Kinematics (IK), speech visemes, and independent wink/brow tracking.
+  * Full-featured **2D Puppet Studio** with Photoshop (.PSD) multi-layer character import (multi-slot sharing + remembered PSD), Paper Puppet Sheet auto-slicing, 3-part limb rigging, 2-bone Inverse Kinematics (IK), speech visemes, and independent wink/brow tracking.
+  * **Character-Only NDI Video Output** (`BGRA` transparent alpha or Chroma/White) via runtime NDI detection (`/usr/local/lib/libndi.dylib`) and **Live Camera / Video / Photo** reference tracking input.
   * Low-latency UDP OSC packet streaming (default `127.0.0.1:9000`).
   * See [macos-native/README.md](macos-native/README.md) for dedicated native architecture docs.
 * **`electron/` & `src/` — Cross-Platform Desktop & Web App (React 19, Vite, MediaPipe)**:
-  * MediaPipe Hand Landmarker, Pose, and Gesture Recognizer running locally/offline with bundled WASM runtimes.
-  * Native UDP socket broadcasting via Electron bridge.
+  * MediaPipe Hand Landmarker, Pose, and Face Landmarker running locally/offline with bundled WASM runtimes.
+  * Native UDP socket broadcasting via Electron bridge (`npm run package:mac`).
   * See [ELECTRON.md](ELECTRON.md) for build, development, and packaging instructions.
 
 ---
@@ -44,8 +45,8 @@ A multi-modal motion tracking, real-time 2D puppet animation, and OSC (Open Soun
 # Build the native macOS release .app bundle
 ./macos-native/build-app.sh
 
-# Launch the app
-open "macos-native/build/HandOSC Native.app"
+# Launch Puppet Studio
+open "macos-native/build/Puppet Studio.app"
 ```
 
 The build script compiles with optimizations (`swift build -c release`), copies resources, strips extended attributes, and applies local ad-hoc code-signing so macOS camera security permissions bind cleanly.
@@ -54,7 +55,17 @@ The build script compiles with optimizations (`swift build -c release`), copies 
 
 ## Core Capabilities (Native macOS App)
 
-### 1. 2D Puppet Studio & Character Rigging
+### 1. Photoshop (.PSD) & Character Workflow (⌘N)
+* **Direct Photoshop (.PSD) Import**:
+  * One-click zero-dependency parser for multi-layer Photoshop and Procreate `.psd` files.
+  * Extracts trimmed RGBA layers directly from PackBits RLE bitmap streams with clean alpha premultiplication.
+  * Intelligent multilingual layer-to-slot auto-matcher (Finnish & English: `Pää`, `Vartalo`, `Olkavarsi`, `Kyynärvarsi`, `Kämmen`, `Kämmenselkä`, `Reisi`, `Sääri`, `Jalkaterä`, `Silmä`, `Suu`, etc.).
+  * **Multi-Slot Sharing & Remembered PSD**: Assign a single PSD layer to multiple puppet slots (e.g. sharing one mouth layer across `Mouth (Ah)` and `Mouth (Oh)`), copy exact uncropped sprites between slots, and reopen your remembered PSD without re-selecting it from Finder.
+  * **Smart Joint & Pin Solver**: Automatically derives exact joint pivots (neck base, eye anchors, brow warp points, mouth visemes, and shoulder mount sockets) directly from layer overlaps on your Photoshop canvas.
+* **New Puppet Workflow (⌘N)**:
+  * Modal with 3 clean options: **Import Layered Photoshop (.PSD)**, **Import Paper Puppet Sprite Sheet**, or **Start Blank Human Rig**.
+
+### 2. 2D Puppet Studio & Character Rigging
 * **Symmetrical Front-Facing Architecture**: Designed from the ground up for clean, anatomically balanced characters (humanoids, stylized characters, robots, fantasy rigs).
 * **Paper Puppet Sheet Auto-Slicer & AI Guide**:
   * One-click import of traditional cut-out sprite sheets (transparent PNG/WebP or solid black/custom background).
@@ -99,17 +110,22 @@ The build script compiles with optimizations (`swift build -c release`), copies 
 * **Speech Viseme Lip-Sync**: Real-time mouth height and smile/pucker analysis dynamically drives speech visemes (`Neutral`, `Ah`, `Oh`, `Ee`/`Smile`) with hybrid sprite-swap and jaw-warp options.
 * **One-Click Neutral Calibration**: Instant baseline zeroing for resting face posture.
 
-### 4. Precise Hand Tracking & 3D Palm Orientation
-* **Anatomical Gating**: Candidate filtering requires $\ge 11$ confident joints and enforces body reach boundaries ($\le 0.74$ screen distance from shoulders) to eliminate background false positives.
-* **3D Palm Orientation**: Detects palm facing camera vs. back-of-hand. Flipping the palm mirrors the thumb along the hand's local coordinate axis without twisting pointing direction.
+### 4. Precise Hand Tracking, 3D Palm Orientation & Back-of-Hand Swap
+* **Skeleton-Anchored L/R Identity**: Candidate filtering requires $\ge 11$ confident joints and anchors single-hand detections to live body-pose wrists/shoulders so half-body poses never swap left and right.
+* **3D Palm Orientation & Back-of-Hand Slots**: Detects palm facing camera vs. back-of-hand. Supports dedicated `L Hand (Back)` / `R Hand (Back)` sprites (`Kämmenselkä`) when `Dynamic Palm Flip` is active, or mirrors the palm cleanly along its local finger axis without twisting pointing direction.
 
-### 5. Multi-Mode Stage & Broadcast Video Keying
+### 5. Multi-Mode Stage, Reference Media & NDI Alpha Output
 * **View Modes**:
   * **Split: Camera + Puppet**: Side-by-side view for monitoring tracking telemetry and character performance simultaneously.
   * **2D Puppet Studio**: Full rigging and editing workspace with pin telemetry and layer stack controls.
   * **Full Stage Preview**: Fullscreen puppet view with collapsible camera picture-in-picture.
   * **Clean Feed**: Toggle off all UI elements for direct screen capture or projector output.
-* **Stage Backgrounds**: Switch between **Dark Stage**, **Clean White Stage**, **Chroma Green**, and **Chroma Blue** for live chroma keying in OBS Studio, TouchDesigner, Resolume, Vuo, or Max/MSP.
+* **NDI Video Output (Transparent Alpha / Chroma)**:
+  * Click **`NDI Out`** in the header bar to stream `1280×720` character-only video to **OBS Studio**, **TouchDesigner**, **Resolume**, or **NDI Video Monitor** (requires `/usr/local/lib/libndi.dylib` from NDI Tools/Runtime).
+  * Choose **Transparent (Alpha BGRA)**, **Match Stage Background**, **Chroma Green**, or **Solid White** from the NDI dropdown.
+* **Live Camera, Video File & Reference Photo Input**:
+  * Switch between **Live Camera**, **Video…** (`.mp4`/`.mov` with Play/Pause), and **Photo…** (`.png`/`.jpg`) directly in the camera preview or sidebar to tune puppet rigs hands-free, plus a **`3s Pose`** countdown timer for A-Pose / neutral calibration.
+* **Stage Backgrounds**: Switch between **Dark Stage**, **Clean White Stage**, **Chroma Green**, and **Chroma Blue** for live chroma keying.
 
 ### 6. Sub-Millisecond OSC Broadcasting
 * Streams normalized coordinates, gesture classifications, and facial blendshapes over UDP socket (`127.0.0.1:9000`).
@@ -146,8 +162,8 @@ Contributions are welcome! To get started:
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/<your-username>/HandBodyFaceOSC.git
-   cd HandBodyFaceOSC
+   git clone https://github.com/yourbartender/2DPuppetStudio.git
+   cd 2DPuppetStudio
    ```
 2. Build and launch the native macOS application:
    ```bash

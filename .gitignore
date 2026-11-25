@@ -14,6 +14,7 @@ Thumbs.db
 # ==========================================
 .build/
 macos-native/.build/
+macos-native/.swiftpm/
 build/
 macos-native/build/
 *.app/
@@ -21,6 +22,17 @@ macos-native/build/
 *.ipa
 .swiftpm/
 DerivedData/
+
+# ==========================================
+# Large Designer Assets & Test Media
+# ==========================================
+*.psd
+*.psb
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.tsbuildinfo
 
 # Xcode project and user data
 *.xcodeproj/*

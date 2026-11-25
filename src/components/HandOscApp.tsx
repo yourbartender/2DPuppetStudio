@@ -45,12 +45,12 @@ export function HandOscApp() {
     handsSendAxisGrouped: true,
     handsSendGesture: true,
 
-    trackPose: false,
+    trackPose: true,
     poseSendLandmarks: true,
     poseSendBundled: false,
     poseSendAxisGrouped: true,
 
-    trackFace: false,
+    trackFace: true,
     faceTier: "curated",
     faceSendLandmarks: false,
     faceSendBundled: false,
@@ -102,9 +102,9 @@ export function HandOscApp() {
               <Hand className="h-5 w-5 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">HandOSC</h1>
+              <h1 className="text-lg font-semibold tracking-tight">Puppet Studio</h1>
               <p className="text-xs text-muted-foreground">
-                MediaPipe Hands → OSC for macOS
+                MediaPipe Hand, Body &amp; Face → OSC
               </p>
             </div>
           </div>
