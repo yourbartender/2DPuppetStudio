@@ -127,8 +127,9 @@ npm run package:linux
   * **2D Puppet Studio**: Main stage, mini-camera bar, and full 2-tab Rigging & Proportions Inspector.
   * **Full Stage Preview**: Fullscreen stage with collapsible camera PiP and **Clean Feed (Hide UI)** for direct OBS Window Capture or projector output.
   * **Camera & OSC**: Dedicated full-frame tracking telemetry and OSC configuration.
-* **Character-Only NDI Video Output (macOS Native)**:
-  * Click **`NDI Out`** in the header bar to stream `1280×720` character-only video to **OBS Studio**, **TouchDesigner**, **Resolume**, or **NDI Video Monitor** (auto-detects `/usr/local/lib/libndi.dylib` from NDI Tools/Runtime at runtime with zero build dependency).
+* **Character-Only NDI Video Output (macOS Native & Cross-Platform Electron)**:
+  * Click **`NDI Out`** in the header bar to stream `1280×720` character-only video to **OBS Studio**, **TouchDesigner**, **Resolume**, or **NDI Video Monitor**.
+  * Auto-detects the system NDI runtime at launch (`/usr/local/lib/libndi.dylib` on macOS, `Processing.NDI.Lib.x64.dll` on Windows, `libndi.so` on Linux — zero compile-time SDK dependency).
   * Header dropdown lets you pick **Transparent (Alpha BGRA)** (straight alpha for compositing directly over paintings/scenes), **Match Stage Background**, **Chroma Green**, or **Solid White**.
 * **OBS & Broadcast Integration (Windows / Linux / macOS Electron)**:
   * Use **Full Stage Preview → Clean Feed (Hide UI)** with **Chroma Green** or **Chroma Blue** backgrounds for instant OBS Studio Window Capture + Chroma Key.
@@ -196,7 +197,7 @@ If your webcam preview freezes or displays a black frame on macOS:
 
 ## Roadmap
 
-* [x] **Character-Only NDI Video Output (macOS Native)**: Live `1280×720` straight-alpha `BGRA` and Chroma/White NDI streaming into OBS Studio, TouchDesigner, and Resolume.
-* [x] **Cross-Platform Windows / Linux / macOS Electron Port**: Full 2D Puppet Studio parity (stage, PSD import, sheet slicer, pin rigging, 2-bone IK, MediaPipe 52 blendshapes, `.puppet.json` compatibility, and `package:win` / `package:mac` / `package:linux` scripts).
-* [ ] **Syphon GPU Texture Output (macOS)** & **Native NDI Output on Windows/Electron**.
+* [x] **Character-Only NDI Video Output (macOS Native & Windows/Linux/macOS Electron)**: Live `1280×720` straight-alpha `BGRA` and Chroma/White NDI streaming into OBS Studio, TouchDesigner, and Resolume.
+* [x] **Cross-Platform Windows / Linux / macOS Electron Port**: Full 2D Puppet Studio parity (stage, PSD import, sheet slicer, pin rigging, 2-bone IK, MediaPipe 52 blendshapes, NDI alpha output, `.puppet.json` compatibility, and `package:win` / `package:mac` / `package:linux` scripts).
+* [ ] **Syphon GPU Texture Output (macOS)**.
 * [ ] **Animation Recording & Timeline**: Direct video export to MP4 / ProRes (with alpha channel) and in-app keyframe timeline.

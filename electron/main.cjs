@@ -2,10 +2,12 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
 const osc = require("osc");
+const { NdiSenderBridge } = require("./ndiSender.cjs");
 
 let win = null;
 let udpPort = null;
 let udpReadyPromise = null;
+const ndiBridge = new NdiSenderBridge();
 
 function createWindow() {
   win = new BrowserWindow({
@@ -97,9 +99,22 @@ ipcMain.handle("osc:send", async (_evt, host, port, messages) => {
   return true;
 });
 
+// ── NDI Video Output IPC (Transparent Alpha BGRA / Chroma / White) ──
+ipcMain.handle("ndi:status", () => ndiBridge.getStatus());
+ipcMain.handle("ndi:start", (_evt, sourceName) => ndiBridge.start(sourceName));
+ipcMain.handle("ndi:stop", () => ndiBridge.stop());
+ipcMain.on("ndi:frame", (_evt, width, height, rgbaBytes) => {
+  ndiBridge.sendRgbaFrame(width, height, rgbaBytes);
+});
+
 app.whenReady().then(createWindow);
 
 app.on("will-quit", () => {
+  try {
+    ndiBridge.stop();
+  } catch {
+    // ignore NDI stop errors
+  }
   if (udpPort) {
     try {
       udpPort.close();

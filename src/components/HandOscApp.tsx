@@ -18,7 +18,14 @@ import {
   type MappingMode,
 } from "@/hooks/useHolisticTracker";
 import { faceTierLabel, type FaceTier } from "@/lib/faceSubsets";
-import { isElectron } from "@/lib/oscBridge";
+import {
+  getNdiStatus,
+  isElectron,
+  startNdiOutput,
+  stopNdiOutput,
+  type NdiBackgroundMode,
+  type NdiStatus,
+} from "@/lib/oscBridge";
 import {
   STAGE_BACKGROUNDS,
   usePuppetStore,
@@ -53,6 +60,7 @@ import {
   Layers,
   FolderOpen,
   Save,
+  Cast,
 } from "lucide-react";
 
 type WorkspaceMode = "split" | "studio" | "fullStage" | "cameraOsc";
@@ -73,6 +81,31 @@ export function HandOscApp() {
   const [showFullStagePip, setShowFullStagePip] = useState(true);
   const [cleanFeed, setCleanFeed] = useState(false);
 
+  // NDI Video Output state (Transparent Alpha BGRA / Chroma / White)
+  const [ndiStatus, setNdiStatus] = useState<NdiStatus>({
+    available: false,
+    enabled: false,
+    sourceName: "Puppet Studio",
+    framesSent: 0,
+    reason: "Checking NDI…",
+  });
+  const [ndiBgMode, setNdiBgMode] = useState<NdiBackgroundMode>("alpha");
+
+  useEffect(() => {
+    getNdiStatus().then(setNdiStatus).catch(() => {});
+  }, []);
+
+  const toggleNdi = async () => {
+    if (!ndiStatus.available) return;
+    if (ndiStatus.enabled) {
+      const st = await stopNdiOutput();
+      setNdiStatus(st);
+    } else {
+      const st = await startNdiOutput("Puppet Studio");
+      setNdiStatus(st);
+    }
+  };
+
   // Modals + remembered PSD cache
   const [showNewModal, setShowNewModal] = useState(false);
   const [showPSDModal, setShowPSDModal] = useState(false);
@@ -90,7 +123,7 @@ export function HandOscApp() {
     port: 9000,
     fps: 60,
     mirror: true,
-    smoothMinCutoff: 4.0,
+    smoothMinCutoff: 1.8,
     smoothBeta: 0.17,
     mapping: "centered_aspect",
     screenWidth: typeof window !== "undefined" ? window.screen.width : 1920,
@@ -617,6 +650,50 @@ export function HandOscApp() {
                 </button>
               </div>
 
+              {/* NDI Video Output Toggle + Background Mode Dropdown (macOS & Windows) */}
+              <div
+                className={`inline-flex items-center overflow-hidden rounded-lg border text-[11px] ${
+                  ndiStatus.enabled
+                    ? "border-emerald-400/50 bg-emerald-500/20 text-emerald-200"
+                    : "border-white/10 bg-black/30 text-muted-foreground"
+                }`}
+                title={ndiStatus.reason}
+              >
+                <button
+                  type="button"
+                  onClick={toggleNdi}
+                  disabled={!ndiStatus.available}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 font-medium transition hover:bg-white/10 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <Cast className="h-3.5 w-3.5" />
+                  {ndiStatus.enabled
+                    ? ndiBgMode === "alpha"
+                      ? "NDI Alpha"
+                      : "NDI Live"
+                    : "NDI Out"}
+                </button>
+                <select
+                  value={ndiBgMode}
+                  onChange={(e) => setNdiBgMode(e.target.value as NdiBackgroundMode)}
+                  disabled={!ndiStatus.available}
+                  className="border-l border-white/10 bg-transparent px-1.5 py-1.5 text-[10px] outline-none disabled:opacity-45"
+                  title="NDI background mode"
+                >
+                  <option value="alpha" className="bg-[#161a24] text-white">
+                    Transparent (Alpha BGRA)
+                  </option>
+                  <option value="stage" className="bg-[#161a24] text-white">
+                    Match Stage Background
+                  </option>
+                  <option value="green" className="bg-[#161a24] text-white">
+                    Chroma Green
+                  </option>
+                  <option value="white" className="bg-[#161a24] text-white">
+                    Solid White
+                  </option>
+                </select>
+              </div>
+
               <span
                 className={`hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium xl:inline-flex ${
                   electron
@@ -675,6 +752,8 @@ export function HandOscApp() {
                 isFullStage={false}
                 onToggleFullStage={() => setMode("fullStage")}
                 compact
+                ndiEnabled={ndiStatus.enabled && !modalOpen}
+                ndiBgMode={ndiBgMode}
               />
             </div>
 
@@ -684,9 +763,9 @@ export function HandOscApp() {
 
         {/* MODE 2: 2D PUPPET STUDIO (Large Stage + Mini Camera + Full Rigging Inspector) */}
         {mode === "studio" && (
-          <div className="grid h-full grid-cols-1 gap-3 lg:grid-cols-12">
-            <div className="flex h-full flex-col gap-3 lg:col-span-8">
-              <div className="min-h-0 flex-1">
+          <div className="grid h-full min-h-0 grid-cols-1 gap-3 overflow-hidden lg:grid-cols-12">
+            <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden lg:col-span-8">
+              <div className="min-h-0 flex-1 overflow-hidden">
                 <PuppetStageCanvas
                   store={store}
                   frameRef={tracker.frameRef}
@@ -697,16 +776,18 @@ export function HandOscApp() {
                   onStartCountdown={() => tracker.startCountdownCalibration(3)}
                   isFullStage={false}
                   onToggleFullStage={() => setMode("fullStage")}
+                  ndiEnabled={ndiStatus.enabled && !modalOpen}
+                  ndiBgMode={ndiBgMode}
                 />
               </div>
 
               {/* Bottom Strip: Mini Camera Feed + Live Expression Gauges */}
-              <div className="grid h-36 shrink-0 grid-cols-12 gap-3">
-                <div className="col-span-5 h-full">
+              <div className="grid h-36 shrink-0 grid-cols-12 gap-3 overflow-hidden">
+                <div className="col-span-5 h-full min-h-0">
                   {renderCameraCanvasBox("h-full", true)}
                 </div>
-                <Card className="col-span-7 flex flex-col justify-between border-border/60 bg-card/60 p-3 text-xs">
-                  <div className="flex items-center justify-between">
+                <div className="col-span-7 flex h-full min-h-0 flex-col justify-start gap-2 overflow-hidden rounded-xl border border-border/60 bg-card/60 px-3 py-2 text-xs shadow">
+                  <div className="flex shrink-0 items-center justify-between">
                     <span className="font-semibold text-cyan-300">Live Tracking Telemetry</span>
                     <span className="font-mono text-[11px] text-muted-foreground">
                       {stats.fps} fps • {stats.hands} hand{stats.hands === 1 ? "" : "s"} •{" "}
@@ -716,10 +797,12 @@ export function HandOscApp() {
                   <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                     <MeterRow label="Mouth Open" value={stats.faceSummary.mouthOpen} color="bg-amber-400" />
                     <MeterRow label="Smile" value={stats.faceSummary.mouthSmile} color="bg-emerald-400" />
+                    <MeterRow label="Pucker (Oh)" value={stats.faceSummary.mouthPucker} color="bg-pink-400" />
+                    <MeterRow label="Brows Raise" value={stats.faceSummary.browRaise} color="bg-sky-400" />
                     <MeterRow label="L Wink/Blink" value={stats.faceSummary.eyeBlinkL} color="bg-cyan-400" />
                     <MeterRow label="R Wink/Blink" value={stats.faceSummary.eyeBlinkR} color="bg-cyan-400" />
                   </div>
-                </Card>
+                </div>
               </div>
             </div>
 
@@ -748,6 +831,8 @@ export function HandOscApp() {
               isFullStage
               onToggleFullStage={() => setMode("studio")}
               cleanFeed={cleanFeed}
+              ndiEnabled={ndiStatus.enabled && !modalOpen}
+              ndiBgMode={ndiBgMode}
             />
 
             {/* Floating Camera PiP */}

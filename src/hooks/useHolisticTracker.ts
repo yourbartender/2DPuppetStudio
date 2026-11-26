@@ -654,10 +654,11 @@ export function useHolisticTracker(
         if (posesRaw.length > 0) {
           const lm = posesRaw[0] as Landmark[];
           const smoothed = smoothLandmarks(smootherRef.current, "P", lm, smoothTimestamp);
-          screenPose = smoothed.map((p) => ({
+          screenPose = smoothed.map((p, idx) => ({
             x: isMirror ? 1 - p.x : p.x,
             y: p.y,
             z: p.z,
+            visibility: lm[idx]?.visibility ?? 1,
           }));
           poseCacheRef.current = { landmarks: screenPose, lastSeenMs: now };
           latestPoseRef.current = screenPose;
@@ -706,8 +707,14 @@ export function useHolisticTracker(
           const p12 = finalPose[12];
           const leftWristIdx = p11.x <= p12.x ? 15 : 16;
           const rightWristIdx = leftWristIdx === 15 ? 16 : 15;
-          poseLeftWrist = finalPose[leftWristIdx];
-          poseRightWrist = finalPose[rightWristIdx];
+          const lw = finalPose[leftWristIdx];
+          const rw = finalPose[rightWristIdx];
+          if ((lw.visibility ?? 1) >= 0.5 && lw.y >= 0.01 && lw.y <= 0.98) {
+            poseLeftWrist = lw;
+          }
+          if ((rw.visibility ?? 1) >= 0.5 && rw.y >= 0.01 && rw.y <= 0.98) {
+            poseRightWrist = rw;
+          }
         }
 
         // Precompute screen-space label for each detected hand so 1-hand and 2-hand matching never cross
@@ -1040,8 +1047,33 @@ export function useHolisticTracker(
 
   useEffect(() => {
     if (!running) {
-      // Clear tracking gracefully when stopped
+      // Clear tracking & caches gracefully when stopped so nothing jitters
+      handCacheRef.current = {};
+      poseCacheRef.current = { landmarks: null, lastSeenMs: 0 };
+      faceCacheRef.current = {
+        metrics: createEmptyFaceMetrics(),
+        lastSeenMs: 0,
+        lockedHeadScale: 1,
+      };
       frameRef.current = createEmptyTrackedFrame();
+      setStats((p) => ({
+        ...p,
+        fps: 0,
+        msgsPerSec: 0,
+        hands: 0,
+        poses: 0,
+        faces: 0,
+        gestures: {},
+        viseme: "neutral",
+        faceSummary: {
+          mouthOpen: 0,
+          mouthSmile: 0,
+          mouthPucker: 0,
+          browRaise: 0,
+          eyeBlinkL: 0,
+          eyeBlinkR: 0,
+        },
+      }));
       return;
     }
     start().catch((e) =>

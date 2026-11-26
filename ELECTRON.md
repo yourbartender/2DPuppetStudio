@@ -20,6 +20,9 @@ Designed as a full cross-platform counterpart to `macos-native/` so **Windows / 
   - **Face & Expressions** (`face_landmarker.task`): 478 landmarks + **52 ARKit blendshapes** driving jaw warp, brow lift, independent L/R winks, and speech visemes (`Neutral`, `Ah`, `Oh`, `Smile`, `Wide`).
   - **Input Sources**: Switch between **Live Camera**, **Video File** (`.mp4`/`.mov`/`.webm` with Play/Pause), and **Still Photo** (`.png`/`.jpg`) plus instant **Calibrate** & **`3s Pose`** countdown.
   - **Smooth Tracking Timeout**: Holds briefly on lost tracking, then glides smoothly back to neutral resting pose instead of snapping or leaving ghost skeletons.
+- **Character-Only NDI Video Output (Windows, macOS & Linux)**:
+  - Click **`NDI Out`** in the header bar to stream `1280×720` straight-alpha `BGRA` (Transparent), `Match Stage Background`, `Chroma Green`, or `Solid White` to OBS Studio, TouchDesigner, Resolume, or NDI Video Monitor.
+  - Auto-detects the system NDI runtime (`Processing.NDI.Lib.x64.dll` on Windows, `/usr/local/lib/libndi.dylib` on macOS, `libndi.so` on Linux) dynamically via prebuilt `koffi` FFI with zero C++ build steps.
 - **UDP OSC Broadcasting**:
   - Streams `/hand/L|R/*`, `/pose/*`, `/face/*`, and `/face/blendshape/*` to Max/MSP, TouchDesigner, Ableton Live, Resolume, VCV Rack, etc. (default `127.0.0.1:9000`).
 

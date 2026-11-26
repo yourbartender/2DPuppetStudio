@@ -26,6 +26,7 @@ import {
   type TrackedFrame,
   type TrackedHand,
 } from "@/lib/trackingTypes";
+import { sendNdiRgbaFrame, type NdiBackgroundMode } from "@/lib/oscBridge";
 
 interface Point {
   x: number;
@@ -44,6 +45,8 @@ interface PuppetStageCanvasProps {
   onToggleFullStage: () => void;
   cleanFeed?: boolean;
   compact?: boolean;
+  ndiEnabled?: boolean;
+  ndiBgMode?: NdiBackgroundMode;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -52,6 +55,26 @@ function clamp(v: number, lo: number, hi: number): number {
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let diff = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return a + diff * t;
+}
+
+function smoothPtWithDeadband(
+  prev: Point | null,
+  target: Point,
+  alpha: number,
+  deadbandPx: number,
+): Point {
+  if (!prev) return { x: target.x, y: target.y };
+  const d = Math.hypot(target.x - prev.x, target.y - prev.y);
+  if (d < deadbandPx) return prev;
+  // Adaptive alpha: snappier on large intentional moves, calmer on small micro-jitter
+  const k = clamp(alpha + (d > 24 ? 0.18 : 0), 0.08, 0.55);
+  return { x: lerp(prev.x, target.x, k), y: lerp(prev.y, target.y, k) };
 }
 
 function lerpPt(a: Point, b: Point, t: number): Point {
@@ -221,9 +244,13 @@ export function PuppetStageCanvas({
   onToggleFullStage,
   cleanFeed = false,
   compact = false,
+  ndiEnabled = false,
+  ndiBgMode = "alpha",
 }: PuppetStageCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const ndiCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const lastNdiSendRef = useRef<number>(0);
 
   const [zoom, setZoom] = useState(1.0);
   const [frozen, setFrozen] = useState(false);
@@ -241,12 +268,16 @@ export function PuppetStageCanvas({
   frozenRef.current = frozen;
   const showPinsRef = useRef(showPins);
   showPinsRef.current = showPins;
+  const ndiEnabledRef = useRef(ndiEnabled);
+  ndiEnabledRef.current = ndiEnabled;
+  const ndiBgModeRef = useRef(ndiBgMode);
+  ndiBgModeRef.current = ndiBgMode;
 
   // Persistent animation smoothing state (auto-blink & smoothed head/limbs)
-  const animStateRef = useRef({
+  const animStateRef = useRef<AnimState>({
     nextAutoBlinkMs: performance.now() + 2600,
     autoBlinkStartMs: 0,
-    lastFrame: null as TrackedFrame | null,
+    lastFrame: null,
     smoothHeadX: 0,
     smoothHeadY: 0,
     smoothRoll: 0,
@@ -257,6 +288,14 @@ export function PuppetStageCanvas({
     smoothBrow: 0,
     smoothBlinkL: 0,
     smoothBlinkR: 0,
+    smoothLeftWristRel: null,
+    smoothRightWristRel: null,
+    smoothLeftPoleRel: null,
+    smoothRightPoleRel: null,
+    smoothLeftWristAngle: Math.PI * 0.58,
+    smoothRightWristAngle: Math.PI * 0.42,
+    smoothLeftAnkleRel: null,
+    smoothRightAnkleRel: null,
   });
 
   useEffect(() => {
@@ -277,6 +316,11 @@ export function PuppetStageCanvas({
           canvas.height = targetH;
         }
 
+        const activeFrame =
+          frozenRef.current && animStateRef.current.lastFrame
+            ? animStateRef.current.lastFrame
+            : frameRef.current;
+
         const ctx = canvas.getContext("2d");
         if (ctx) {
           ctx.save();
@@ -288,18 +332,51 @@ export function PuppetStageCanvas({
             now,
             storeRef.current.rig,
             storeRef.current.images,
-            frozenRef.current && animStateRef.current.lastFrame
-              ? animStateRef.current.lastFrame
-              : frameRef.current,
+            activeFrame,
             calRef.current,
             zoomRef.current,
             showPinsRef.current,
             animStateRef.current,
+            null,
+            true,
           );
           if (!frozenRef.current) {
             animStateRef.current.lastFrame = frameRef.current;
           }
           ctx.restore();
+        }
+
+        // Character-only NDI Video Output (1280x720 @ ~30 FPS, straight-alpha BGRA or Chroma/White)
+        if (ndiEnabledRef.current && now - lastNdiSendRef.current >= 33) {
+          lastNdiSendRef.current = now;
+          if (!ndiCanvasRef.current) {
+            const c = document.createElement("canvas");
+            c.width = 1280;
+            c.height = 720;
+            ndiCanvasRef.current = c;
+          }
+          const ndiCtx = ndiCanvasRef.current.getContext("2d", {
+            willReadFrequently: true,
+          });
+          if (ndiCtx) {
+            drawStage(
+              ndiCtx,
+              1280,
+              720,
+              now,
+              storeRef.current.rig,
+              storeRef.current.images,
+              activeFrame,
+              calRef.current,
+              zoomRef.current,
+              false,
+              animStateRef.current,
+              ndiBgModeRef.current,
+              false,
+            );
+            const imgData = ndiCtx.getImageData(0, 0, 1280, 720);
+            sendNdiRgbaFrame(1280, 720, new Uint8Array(imgData.data.buffer));
+          }
         }
       }
       raf = requestAnimationFrame(render);
@@ -570,6 +647,15 @@ interface AnimState {
   smoothBrow: number;
   smoothBlinkL: number;
   smoothBlinkR: number;
+  // Normalized relative-to-shoulder/hip limb targets so smoothing stays resolution-independent
+  smoothLeftWristRel: Point | null;
+  smoothRightWristRel: Point | null;
+  smoothLeftPoleRel: Point | null;
+  smoothRightPoleRel: Point | null;
+  smoothLeftWristAngle: number;
+  smoothRightWristAngle: number;
+  smoothLeftAnkleRel: Point | null;
+  smoothRightAnkleRel: Point | null;
 }
 
 function drawStage(
@@ -584,33 +670,47 @@ function drawStage(
   zoom: number,
   showPins: boolean,
   anim: AnimState,
+  ndiBgOverride: NdiBackgroundMode | null,
+  updateSmoothing: boolean,
 ) {
-  // 1. Background
-  const bg = STAGE_BACKGROUNDS.find((b) => b.id === rig.stageBackground) ?? STAGE_BACKGROUNDS[0];
-  ctx.fillStyle = bg.cssColor;
-  ctx.fillRect(0, 0, w, h);
-
-  if (rig.stageBackground === "dark") {
-    const grad = ctx.createRadialGradient(w * 0.5, h * 0.45, 20, w * 0.5, h * 0.5, Math.max(w, h) * 0.65);
-    grad.addColorStop(0, "rgba(42, 54, 78, 0.25)");
-    grad.addColorStop(1, "rgba(10, 12, 18, 0.35)");
-    ctx.fillStyle = grad;
+  // 1. Background (supports transparent alpha clear for NDI output!)
+  if (ndiBgOverride === "alpha") {
+    ctx.clearRect(0, 0, w, h);
+  } else if (ndiBgOverride === "green") {
+    ctx.fillStyle = "#00d926";
     ctx.fillRect(0, 0, w, h);
+  } else if (ndiBgOverride === "white") {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, w, h);
+  } else {
+    const bg = STAGE_BACKGROUNDS.find((b) => b.id === rig.stageBackground) ?? STAGE_BACKGROUNDS[0];
+    ctx.fillStyle = bg.cssColor;
+    ctx.fillRect(0, 0, w, h);
+
+    if (rig.stageBackground === "dark") {
+      const grad = ctx.createRadialGradient(w * 0.5, h * 0.45, 20, w * 0.5, h * 0.5, Math.max(w, h) * 0.65);
+      grad.addColorStop(0, "rgba(42, 54, 78, 0.25)");
+      grad.addColorStop(1, "rgba(10, 12, 18, 0.35)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+    }
   }
 
-  // Smooth face metrics gently at 60 FPS
+  // Smooth face metrics gently at 60 FPS (only update once per animation frame, not on NDI copy)
   const f = frame.face;
-  const k = 0.28;
-  anim.smoothHeadX = lerp(anim.smoothHeadX, f.present ? f.headX : 0, k);
-  anim.smoothHeadY = lerp(anim.smoothHeadY, f.present ? f.headY : 0, k);
-  anim.smoothRoll = lerp(anim.smoothRoll, f.present ? f.roll : 0, k);
-  anim.smoothYaw = lerp(anim.smoothYaw, f.present ? f.yaw : 0, k);
-  anim.smoothPitch = lerp(anim.smoothPitch, f.present ? f.pitch : 0, k);
-  anim.smoothMouth = lerp(anim.smoothMouth, f.present ? f.mouthOpen : 0, 0.38);
-  anim.smoothSmile = lerp(anim.smoothSmile, f.present ? f.mouthSmile : 0, 0.32);
-  anim.smoothBrow = lerp(anim.smoothBrow, f.present ? f.browRaise : 0, 0.32);
-  anim.smoothBlinkL = lerp(anim.smoothBlinkL, f.present ? f.eyeBlinkL : 0, 0.48);
-  anim.smoothBlinkR = lerp(anim.smoothBlinkR, f.present ? f.eyeBlinkR : 0, 0.48);
+  if (updateSmoothing) {
+    const k = 0.24;
+    anim.smoothHeadX = lerp(anim.smoothHeadX, f.present ? f.headX : 0, k);
+    anim.smoothHeadY = lerp(anim.smoothHeadY, f.present ? f.headY : 0, k);
+    anim.smoothRoll = lerp(anim.smoothRoll, f.present ? f.roll : 0, k);
+    anim.smoothYaw = lerp(anim.smoothYaw, f.present ? f.yaw : 0, k);
+    anim.smoothPitch = lerp(anim.smoothPitch, f.present ? f.pitch : 0, k);
+    anim.smoothMouth = lerp(anim.smoothMouth, f.present ? f.mouthOpen : 0, 0.36);
+    anim.smoothSmile = lerp(anim.smoothSmile, f.present ? f.mouthSmile : 0, 0.3);
+    anim.smoothBrow = lerp(anim.smoothBrow, f.present ? f.browRaise : 0, 0.3);
+    anim.smoothBlinkL = lerp(anim.smoothBlinkL, f.present ? f.eyeBlinkL : 0, 0.45);
+    anim.smoothBlinkR = lerp(anim.smoothBlinkR, f.present ? f.eyeBlinkR : 0, 0.45);
+  }
 
   // Periodic natural auto-blink
   let autoBlink = 0;
@@ -742,21 +842,24 @@ function drawStage(
   const computeArmIK = (side: "L" | "R") => {
     const isLeft = side === "L";
     const shoulder = isLeft ? leftShoulderWorld : rightShoulderWorld;
-    const restWrist: Point = {
-      x: shoulder.x + (isLeft ? -1 : 1) * (upperArmLen * 0.34),
-      y: shoulder.y + (upperArmLen + forearmLen) * 0.84,
+    const armTotalLen = Math.max(1, upperArmLen + forearmLen);
+    const restWristRel: Point = {
+      x: ((isLeft ? -1 : 1) * (upperArmLen * 0.34)) / armTotalLen,
+      y: 0.84,
     };
-    const restElbowPole: Point = {
-      x: shoulder.x + (isLeft ? -1 : 1) * upperArmLen * 0.85,
-      y: shoulder.y + upperArmLen * 0.55,
+    const restPoleRel: Point = {
+      x: ((isLeft ? -1 : 1) * upperArmLen * 0.85) / armTotalLen,
+      y: (upperArmLen * 0.55) / armTotalLen,
     };
+    const restWristAngle = isLeft ? Math.PI * 0.58 : Math.PI * 0.42;
 
     const handObj: TrackedHand | undefined = frame.hands.find((hh) => hh.label === side);
-    let targetWrist: Point | null = null;
-    let elbowPole: Point = restElbowPole;
-    let wristAngle = isLeft ? Math.PI * 0.58 : Math.PI * 0.42;
+    let rawWristRel: Point = restWristRel;
+    let rawPoleRel: Point = restPoleRel;
+    let rawWristAngle = restWristAngle;
     let palmSign = 1;
     let returnBlend = 1;
+    let isActivelyTracked = false;
 
     // Map camera coordinates around torso shoulder baseline isotropically (aspect-corrected)
     const aspect = frame.frameAspect || 16 / 9;
@@ -778,62 +881,122 @@ function drawStage(
       const shIdx = isLeft ? leftIdx : rightIdx;
       const elIdx = shIdx + 2; // 13 or 14
       const wrIdx = shIdx + 4; // 15 or 16
-      camShSpanIso = Math.max(
-        0.14,
-        Math.hypot((p12.x - p11.x) * aspect, p12.y - p11.y),
-      );
-      camOriginX = pose[shIdx].x;
-      camOriginY = pose[shIdx].y;
-      camElbow = pose[elIdx];
-      camPoseWrist = pose[wrIdx];
+      const shLm = pose[shIdx];
+      const elLm = pose[elIdx];
+      const wrLm = pose[wrIdx];
+
+      if ((p11.visibility ?? 1) >= 0.5 && (p12.visibility ?? 1) >= 0.5) {
+        camShSpanIso = Math.max(
+          0.14,
+          Math.hypot((p12.x - p11.x) * aspect, p12.y - p11.y),
+        );
+        camOriginX = shLm.x;
+        camOriginY = shLm.y;
+      }
+
+      // Strictly gate pose elbow & wrist by confidence + in-frame bounds (eliminates desk/off-screen jitter!)
+      const elbowVisible =
+        (elLm.visibility ?? 1) >= 0.58 &&
+        elLm.x >= 0.02 &&
+        elLm.x <= 0.98 &&
+        elLm.y >= 0.02 &&
+        elLm.y <= 0.96;
+      const wristVisible =
+        (wrLm.visibility ?? 1) >= 0.62 &&
+        wrLm.x >= 0.02 &&
+        wrLm.x <= 0.98 &&
+        wrLm.y >= 0.02 &&
+        wrLm.y <= 0.95;
+
+      if (elbowVisible) camElbow = elLm;
+      if (wristVisible) camPoseWrist = wrLm;
     }
 
     const pxPerIsoUnit = (stageShSpan / camShSpanIso) * reachBoost;
 
     if (handObj && handObj.landmarks.length >= 10) {
       const wLm = handObj.landmarks[0];
-      const rawStageTarget: Point = {
-        x: shoulder.x + (wLm.x - camOriginX) * aspect * pxPerIsoUnit,
-        y: shoulder.y + (wLm.y - camOriginY) * pxPerIsoUnit,
+      const targetRel: Point = {
+        x: ((wLm.x - camOriginX) * aspect * pxPerIsoUnit) / armTotalLen,
+        y: ((wLm.y - camOriginY) * pxPerIsoUnit) / armTotalLen,
       };
       returnBlend = handObj.returnToRestBlend;
-      targetWrist = lerpPt(rawStageTarget, restWrist, returnBlend);
-      wristAngle = lerp(handObj.wristAngle, isLeft ? Math.PI * 0.58 : Math.PI * 0.42, returnBlend);
+      rawWristRel = lerpPt(targetRel, restWristRel, returnBlend);
+      rawWristAngle = lerpAngle(handObj.wristAngle, restWristAngle, returnBlend);
       palmSign = handObj.palmFacingSign;
+      isActivelyTracked = returnBlend < 0.99;
     } else if (camPoseWrist && frame.posePresent) {
-      const rawStageTarget: Point = {
-        x: shoulder.x + (camPoseWrist.x - camOriginX) * aspect * pxPerIsoUnit,
-        y: shoulder.y + (camPoseWrist.y - camOriginY) * pxPerIsoUnit,
+      const targetRel: Point = {
+        x: ((camPoseWrist.x - camOriginX) * aspect * pxPerIsoUnit) / armTotalLen,
+        y: ((camPoseWrist.y - camOriginY) * pxPerIsoUnit) / armTotalLen,
       };
       returnBlend = frame.poseReturnBlend;
-      targetWrist = lerpPt(rawStageTarget, restWrist, returnBlend);
+      rawWristRel = lerpPt(targetRel, restWristRel, returnBlend);
       if (camElbow) {
-        wristAngle = Math.atan2(camPoseWrist.y - camElbow.y, (camPoseWrist.x - camElbow.x) * aspect);
+        const poseAngle = Math.atan2(
+          camPoseWrist.y - camElbow.y,
+          (camPoseWrist.x - camElbow.x) * aspect,
+        );
+        rawWristAngle = lerpAngle(poseAngle, restWristAngle, returnBlend);
+      }
+      isActivelyTracked = returnBlend < 0.99;
+    }
+
+    if (camElbow && isActivelyTracked) {
+      const camPoleRel: Point = {
+        x: ((camElbow.x - camOriginX) * aspect * pxPerIsoUnit) / armTotalLen,
+        y: ((camElbow.y - camOriginY) * pxPerIsoUnit) / armTotalLen,
+      };
+      rawPoleRel = lerpPt(restPoleRel, camPoleRel, 0.72 * (1 - returnBlend));
+    }
+
+    // Apply stage-level resolution-independent smoothing + micro-jitter deadband
+    const prevWristRel = isLeft ? anim.smoothLeftWristRel : anim.smoothRightWristRel;
+    const prevPoleRel = isLeft ? anim.smoothLeftPoleRel : anim.smoothRightPoleRel;
+    const prevAngle = isLeft ? anim.smoothLeftWristAngle : anim.smoothRightWristAngle;
+
+    const wristAlpha = isActivelyTracked ? 0.24 : 0.10; // glide calmly back to rest when untracked
+    const deadbandRel = isActivelyTracked ? 0.008 : 0.002;
+    const smoothWristRel = updateSmoothing
+      ? smoothPtWithDeadband(prevWristRel, rawWristRel, wristAlpha, deadbandRel)
+      : (prevWristRel ?? rawWristRel);
+    const smoothPoleRel = updateSmoothing
+      ? smoothPtWithDeadband(prevPoleRel, rawPoleRel, 0.2, 0.01)
+      : (prevPoleRel ?? rawPoleRel);
+    const smoothAngle = updateSmoothing
+      ? lerpAngle(prevAngle, rawWristAngle, isActivelyTracked ? 0.25 : 0.12)
+      : prevAngle;
+
+    if (updateSmoothing) {
+      if (isLeft) {
+        anim.smoothLeftWristRel = smoothWristRel;
+        anim.smoothLeftPoleRel = smoothPoleRel;
+        anim.smoothLeftWristAngle = smoothAngle;
+      } else {
+        anim.smoothRightWristRel = smoothWristRel;
+        anim.smoothRightPoleRel = smoothPoleRel;
+        anim.smoothRightWristAngle = smoothAngle;
       }
     }
 
-    if (camElbow) {
-      const camPole: Point = {
-        x: shoulder.x + (camElbow.x - camOriginX) * aspect * pxPerIsoUnit,
-        y: shoulder.y + (camElbow.y - camOriginY) * pxPerIsoUnit,
-      };
-      // Blend camera elbow hint with natural outward pole
-      elbowPole = {
-        x: lerp(restElbowPole.x, camPole.x, 0.72 * (1 - returnBlend)),
-        y: lerp(restElbowPole.y, camPole.y, 0.72 * (1 - returnBlend)),
-      };
-    }
+    const finalTarget: Point = {
+      x: shoulder.x + smoothWristRel.x * armTotalLen,
+      y: shoulder.y + smoothWristRel.y * armTotalLen,
+    };
+    const finalPole: Point = {
+      x: shoulder.x + smoothPoleRel.x * armTotalLen,
+      y: shoulder.y + smoothPoleRel.y * armTotalLen,
+    };
 
-    const finalTarget = targetWrist ?? restWrist;
-    const solved = solve2BoneIK(shoulder, finalTarget, upperArmLen, forearmLen, elbowPole);
+    const solved = solve2BoneIK(shoulder, finalTarget, upperArmLen, forearmLen, finalPole);
 
     return {
       shoulder,
       elbow: solved.joint,
       wrist: solved.end,
-      wristAngle,
+      wristAngle: smoothAngle,
       palmSign,
-      tracked: Boolean(targetWrist && returnBlend < 0.99),
+      tracked: isActivelyTracked,
     };
   };
 
@@ -875,14 +1038,17 @@ function drawStage(
       const cKnee = pose[kneeIdx];
       const cAnkle = pose[ankleIdx];
 
-      // Only drive leg lifting when hip, knee & ankle are actually in-frame (prevents desk hallucinations)
+      // Only drive leg lifting when hip, knee & ankle are actually visible & in-frame
       const legInFrame =
+        (cHip.visibility ?? 1) >= 0.55 &&
+        (cKnee.visibility ?? 1) >= 0.58 &&
+        (cAnkle.visibility ?? 1) >= 0.58 &&
         cHip.y >= 0.02 &&
-        cHip.y <= 0.98 &&
+        cHip.y <= 0.96 &&
         cKnee.y >= 0.02 &&
-        cKnee.y <= 0.98 &&
+        cKnee.y <= 0.96 &&
         cAnkle.y >= 0.02 &&
-        cAnkle.y <= 0.99;
+        cAnkle.y <= 0.97;
 
       if (legInFrame) {
         const aspect = frame.frameAspect || 16 / 9;

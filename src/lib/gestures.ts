@@ -3,7 +3,7 @@
 // GestureRecognizer task (see useHandTracker.ts), so the old hand-rolled
 // classifier was removed.
 
-export type Landmark = { x: number; y: number; z: number };
+export type Landmark = { x: number; y: number; z: number; visibility?: number };
 
 function dist(a: Landmark, b: Landmark) {
   const dx = a.x - b.x;
