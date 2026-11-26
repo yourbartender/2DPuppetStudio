@@ -758,13 +758,12 @@ function drawStage(
     let palmSign = 1;
     let returnBlend = 1;
 
-    // Map camera coordinates around torso shoulder baseline isotropically
+    // Map camera coordinates around torso shoulder baseline isotropically (aspect-corrected)
     const aspect = frame.frameAspect || 16 / 9;
-    const camShSpan = Math.max(0.12, cal.shoulderSpan);
     const stageShSpan = Math.max(24, dist(leftShoulderWorld, rightShoulderWorld));
     const reachBoost = 1 + rig.armReachExaggeration * 0.9;
-    const pxPerCamUnit = (stageShSpan / camShSpan) * reachBoost;
 
+    let camShSpanIso = Math.max(0.14, cal.shoulderSpan * aspect);
     let camOriginX = isLeft ? cal.leftShoulderX : cal.rightShoulderX;
     let camOriginY = isLeft ? cal.leftShoulderY : cal.rightShoulderY;
     let camElbow: Point | null = null;
@@ -779,17 +778,23 @@ function drawStage(
       const shIdx = isLeft ? leftIdx : rightIdx;
       const elIdx = shIdx + 2; // 13 or 14
       const wrIdx = shIdx + 4; // 15 or 16
+      camShSpanIso = Math.max(
+        0.14,
+        Math.hypot((p12.x - p11.x) * aspect, p12.y - p11.y),
+      );
       camOriginX = pose[shIdx].x;
       camOriginY = pose[shIdx].y;
       camElbow = pose[elIdx];
       camPoseWrist = pose[wrIdx];
     }
 
+    const pxPerIsoUnit = (stageShSpan / camShSpanIso) * reachBoost;
+
     if (handObj && handObj.landmarks.length >= 10) {
       const wLm = handObj.landmarks[0];
       const rawStageTarget: Point = {
-        x: shoulder.x + (wLm.x - camOriginX) * pxPerCamUnit * aspect * 0.65,
-        y: shoulder.y + (wLm.y - camOriginY) * pxPerCamUnit,
+        x: shoulder.x + (wLm.x - camOriginX) * aspect * pxPerIsoUnit,
+        y: shoulder.y + (wLm.y - camOriginY) * pxPerIsoUnit,
       };
       returnBlend = handObj.returnToRestBlend;
       targetWrist = lerpPt(rawStageTarget, restWrist, returnBlend);
@@ -797,20 +802,20 @@ function drawStage(
       palmSign = handObj.palmFacingSign;
     } else if (camPoseWrist && frame.posePresent) {
       const rawStageTarget: Point = {
-        x: shoulder.x + (camPoseWrist.x - camOriginX) * pxPerCamUnit * aspect * 0.65,
-        y: shoulder.y + (camPoseWrist.y - camOriginY) * pxPerCamUnit,
+        x: shoulder.x + (camPoseWrist.x - camOriginX) * aspect * pxPerIsoUnit,
+        y: shoulder.y + (camPoseWrist.y - camOriginY) * pxPerIsoUnit,
       };
       returnBlend = frame.poseReturnBlend;
       targetWrist = lerpPt(rawStageTarget, restWrist, returnBlend);
       if (camElbow) {
-        wristAngle = Math.atan2(camPoseWrist.y - camElbow.y, camPoseWrist.x - camElbow.x);
+        wristAngle = Math.atan2(camPoseWrist.y - camElbow.y, (camPoseWrist.x - camElbow.x) * aspect);
       }
     }
 
     if (camElbow) {
       const camPole: Point = {
-        x: shoulder.x + (camElbow.x - camOriginX) * pxPerCamUnit * aspect * 0.65,
-        y: shoulder.y + (camElbow.y - camOriginY) * pxPerCamUnit,
+        x: shoulder.x + (camElbow.x - camOriginX) * aspect * pxPerIsoUnit,
+        y: shoulder.y + (camElbow.y - camOriginY) * pxPerIsoUnit,
       };
       // Blend camera elbow hint with natural outward pole
       elbowPole = {
@@ -870,28 +875,41 @@ function drawStage(
       const cKnee = pose[kneeIdx];
       const cAnkle = pose[ankleIdx];
 
-      const camLegLen = Math.max(0.15, dist(cHip, cKnee) + dist(cKnee, cAnkle));
-      const scaleLeg = (thighLen + shinLen) / camLegLen;
-      const aspect = frame.frameAspect || 16 / 9;
+      // Only drive leg lifting when hip, knee & ankle are actually in-frame (prevents desk hallucinations)
+      const legInFrame =
+        cHip.y >= 0.02 &&
+        cHip.y <= 0.98 &&
+        cKnee.y >= 0.02 &&
+        cKnee.y <= 0.98 &&
+        cAnkle.y >= 0.02 &&
+        cAnkle.y <= 0.99;
 
-      const rawAnkle: Point = {
-        x: hip.x + (cAnkle.x - cHip.x) * scaleLeg * aspect * 0.62,
-        y: hip.y + (cAnkle.y - cHip.y) * scaleLeg,
-      };
-      const rawKnee: Point = {
-        x: hip.x + (cKnee.x - cHip.x) * scaleLeg * aspect * 0.62,
-        y: hip.y + (cKnee.y - cHip.y) * scaleLeg,
-      };
+      if (legInFrame) {
+        const aspect = frame.frameAspect || 16 / 9;
+        const dThighIso = Math.hypot((cKnee.x - cHip.x) * aspect, cKnee.y - cHip.y);
+        const dShinIso = Math.hypot((cAnkle.x - cKnee.x) * aspect, cAnkle.y - cKnee.y);
+        const camLegLen = Math.max(0.15, dThighIso + dShinIso);
+        const scaleLeg = (thighLen + shinLen) / camLegLen;
 
-      // Only lift leg when user actually lifts ankle noticeably above resting floor
-      const liftedHeight = defaultFoot.y - rawAnkle.y;
-      const isLifted = liftedHeight > stageUnit * 0.025;
-      const clampedAnkle: Point = {
-        x: isLifted ? rawAnkle.x : lerp(defaultFoot.x, rawAnkle.x, 0.35),
-        y: Math.min(floorY, isLifted ? rawAnkle.y : defaultFoot.y),
-      };
-      targetAnkle = lerpPt(clampedAnkle, defaultFoot, frame.poseReturnBlend);
-      kneePole = lerpPt(rawKnee, defaultKneePole, frame.poseReturnBlend);
+        const rawAnkle: Point = {
+          x: hip.x + (cAnkle.x - cHip.x) * aspect * scaleLeg,
+          y: hip.y + (cAnkle.y - cHip.y) * scaleLeg,
+        };
+        const rawKnee: Point = {
+          x: hip.x + (cKnee.x - cHip.x) * aspect * scaleLeg,
+          y: hip.y + (cKnee.y - cHip.y) * scaleLeg,
+        };
+
+        // Only lift leg when user actually lifts ankle noticeably above resting floor
+        const liftedHeight = defaultFoot.y - rawAnkle.y;
+        const isLifted = liftedHeight > stageUnit * 0.025;
+        const clampedAnkle: Point = {
+          x: isLifted ? rawAnkle.x : lerp(defaultFoot.x, rawAnkle.x, 0.35),
+          y: Math.min(floorY, isLifted ? rawAnkle.y : defaultFoot.y),
+        };
+        targetAnkle = lerpPt(clampedAnkle, defaultFoot, frame.poseReturnBlend);
+        kneePole = lerpPt(rawKnee, defaultKneePole, frame.poseReturnBlend);
+      }
     }
 
     const solved = solve2BoneIK(hip, targetAnkle, thighLen, shinLen, kneePole);

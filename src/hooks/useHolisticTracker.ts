@@ -691,51 +691,79 @@ export function useHolisticTracker(
           }
         }
 
-        // ── 2. HANDS (with skeleton-anchored L/R identity + smooth timeout) ──
+        // ── 2. HANDS (skeleton-anchored screen-space L/R + smooth timeout) ──
         const gestures: { L?: string; R?: string } = {};
         const present = { L: false, R: false };
         const freshHands: TrackedHand[] = [];
 
-        // Pose wrist hints in screen space (screen-left = L, screen-right = R)
+        // Screen-space pose wrists: screen-left shoulder -> "L", screen-right shoulder -> "R"
+        // (In mirror mode, user's anatomical left [11/15] is screen-left and right [12/16] is screen-right;
+        //  in non-mirrored video mode, anatomical right [12/16] is screen-left and left [11/15] is screen-right.)
         let poseLeftWrist: Landmark | null = null;
         let poseRightWrist: Landmark | null = null;
         if (finalPose && finalPose.length >= 17) {
-          const w15 = finalPose[15];
-          const w16 = finalPose[16];
-          // Screen-left shoulder/wrist = puppet Left ("L") when mirrored
-          if (isMirror) {
-            poseLeftWrist = w16;
-            poseRightWrist = w15;
-          } else {
-            poseLeftWrist = w15;
-            poseRightWrist = w16;
+          const p11 = finalPose[11];
+          const p12 = finalPose[12];
+          const leftWristIdx = p11.x <= p12.x ? 15 : 16;
+          const rightWristIdx = leftWristIdx === 15 ? 16 : 15;
+          poseLeftWrist = finalPose[leftWristIdx];
+          poseRightWrist = finalPose[rightWristIdx];
+        }
+
+        // Precompute screen-space label for each detected hand so 1-hand and 2-hand matching never cross
+        const assignedLabels: ("L" | "R")[] = handsRaw.map((rawLm, i) => {
+          const lm = rawLm as Landmark[];
+          const rawLabel: "L" | "R" =
+            handed[i]?.[0]?.categoryName === "Left" ? "L" : "R";
+          // MediaPipe GestureRecognizer assumes selfie-mirrored input, so on raw unmirrored video
+          // "Right" = user's physical left hand (screen-left when mirrored).
+          return isMirror ? (rawLabel === "L" ? "R" : "L") : rawLabel;
+        });
+
+        if (handsRaw.length === 1 && poseLeftWrist && poseRightWrist) {
+          const lm = handsRaw[0] as Landmark[];
+          const wx = isMirror ? 1 - lm[0].x : lm[0].x;
+          const wy = lm[0].y;
+          const dL = dist2D(wx, wy, poseLeftWrist.x, poseLeftWrist.y);
+          const dR = dist2D(wx, wy, poseRightWrist.x, poseRightWrist.y);
+          if (Math.min(dL, dR) < 0.30 && Math.abs(dL - dR) > 0.03) {
+            assignedLabels[0] = dL <= dR ? "L" : "R";
+          }
+        } else if (handsRaw.length === 2) {
+          const w0 = handsRaw[0][0];
+          const w1 = handsRaw[1][0];
+          const w0x = isMirror ? 1 - w0.x : w0.x;
+          const w1x = isMirror ? 1 - w1.x : w1.x;
+          if (poseLeftWrist && poseRightWrist) {
+            // Optimal 2x2 assignment to pose wrists (even works when arms cross!)
+            const cost0L1R =
+              dist2D(w0x, w0.y, poseLeftWrist.x, poseLeftWrist.y) +
+              dist2D(w1x, w1.y, poseRightWrist.x, poseRightWrist.y);
+            const cost0R1L =
+              dist2D(w0x, w0.y, poseRightWrist.x, poseRightWrist.y) +
+              dist2D(w1x, w1.y, poseLeftWrist.x, poseLeftWrist.y);
+            if (cost0L1R <= cost0R1L) {
+              assignedLabels[0] = "L";
+              assignedLabels[1] = "R";
+            } else {
+              assignedLabels[0] = "R";
+              assignedLabels[1] = "L";
+            }
+          } else if (assignedLabels[0] === assignedLabels[1]) {
+            // Fallback without pose: screen-left hand is "L", screen-right is "R"
+            if (w0x <= w1x) {
+              assignedLabels[0] = "L";
+              assignedLabels[1] = "R";
+            } else {
+              assignedLabels[0] = "R";
+              assignedLabels[1] = "L";
+            }
           }
         }
 
         for (let i = 0; i < handsRaw.length; i++) {
           const lm = handsRaw[i] as Landmark[];
-          const rawLabel: "L" | "R" =
-            handed[i]?.[0]?.categoryName === "Left" ? "L" : "R";
-          let finalLabel: "L" | "R" = isMirror
-            ? rawLabel === "L"
-              ? "R"
-              : "L"
-            : rawLabel;
-
-          // Screen-space landmarks (top-left origin, mirror applied)
-          const wristScreenX = isMirror ? 1 - lm[0].x : lm[0].x;
-          const wristScreenY = lm[0].y;
-
-          // If single hand visible and pose wrists are available, anchor L/R to closer skeleton wrist
-          if (handsRaw.length === 1 && poseLeftWrist && poseRightWrist) {
-            const dL = dist2D(wristScreenX, wristScreenY, poseLeftWrist.x, poseLeftWrist.y);
-            const dR = dist2D(wristScreenX, wristScreenY, poseRightWrist.x, poseRightWrist.y);
-            if (Math.min(dL, dR) < 0.24 && Math.abs(dL - dR) > 0.05) {
-              finalLabel = dL <= dR ? "L" : "R";
-            }
-          }
-
-          // If two hands and both mapped same label, split by screen X
+          let finalLabel: "L" | "R" = assignedLabels[i] ?? "L";
           if (present[finalLabel]) {
             finalLabel = finalLabel === "L" ? "R" : "L";
           }
@@ -764,18 +792,20 @@ export function useHolisticTracker(
           const midMcp = screenLm[9];
           const idxMcp = screenLm[5];
           const pkyMcp = screenLm[17];
-          const wristAngle = Math.atan2(midMcp.y - wrist.y, midMcp.x - wrist.x);
-          const handScaleVal = dist2D(wrist.x, wrist.y, midMcp.x, midMcp.y);
+          const aspect = srcW / Math.max(1, srcH);
+          const wristAngle = Math.atan2(midMcp.y - wrist.y, (midMcp.x - wrist.x) * aspect);
+          const handScaleVal = Math.hypot((midMcp.x - wrist.x) * aspect, midMcp.y - wrist.y);
 
-          // 2D cross product of (wrist->indexMCP) x (wrist->pinkyMCP) determines palm vs back facing
+          // 2D cross product of (wrist->indexMCP) x (wrist->pinkyMCP) in screen Y-down coords:
+          // Screen-left hand ("L") with palm facing camera has index toward center (+x) & pinky outer (-x) => cross < 0
+          // Screen-right hand ("R") with palm facing camera has index toward center (-x) & pinky outer (+x) => cross > 0
           const v1x = idxMcp.x - wrist.x;
           const v1y = idxMcp.y - wrist.y;
           const v2x = pkyMcp.x - wrist.x;
           const v2y = pkyMcp.y - wrist.y;
           const cross = v1x * v2y - v1y * v2x;
-          // For screen-left hand ("L"), palm facing camera has cross > 0; for "R", cross < 0
           const palmFacingSign =
-            finalLabel === "L" ? (cross >= 0 ? 1 : -1) : cross <= 0 ? 1 : -1;
+            finalLabel === "L" ? (cross <= 0 ? 1 : -1) : cross >= 0 ? 1 : -1;
 
           const trackedHand: TrackedHand = {
             label: finalLabel,
@@ -1133,12 +1163,14 @@ function computeFaceMetrics(
   const browRaise = clamp((browInner * 0.5 + (browOuterL + browOuterR) * 0.35) * 1.35, 0, 1);
 
   // Independent Wink / Blink mapping (mirror-aware!)
-  // MediaPipe eyeBlinkLeft is anatomical user's left eye. When mirrored on screen,
-  // anatomical left eye appears on the RIGHT side of the puppet/screen.
+  // MediaPipe ARKit eyeBlinkLeft is the subject's anatomical LEFT eye.
+  // In Mirror mode (isMirror=true), your left eye appears on the LEFT side of the screen
+  // and must drive the puppet's screen-left eye (eyeBlinkL).
+  // In Non-Mirrored mode (isMirror=false), the subject's right eye appears on screen-left.
   const rawBlinkAnatL = bs.eyeBlinkLeft ?? 0;
   const rawBlinkAnatR = bs.eyeBlinkRight ?? 0;
-  let eyeBlinkL = isMirror ? rawBlinkAnatR : rawBlinkAnatL;
-  let eyeBlinkR = isMirror ? rawBlinkAnatL : rawBlinkAnatR;
+  let eyeBlinkL = isMirror ? rawBlinkAnatL : rawBlinkAnatR;
+  let eyeBlinkR = isMirror ? rawBlinkAnatR : rawBlinkAnatL;
 
   // Suppress sympathetic blink on clear single-eye winks
   const asym = Math.abs(eyeBlinkL - eyeBlinkR);
