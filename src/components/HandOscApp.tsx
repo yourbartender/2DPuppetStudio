@@ -457,7 +457,7 @@ export function HandOscApp() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {(["curated", "contour", "full", "off"] as FaceTier[]).map((t) => (
+                {(["off", "essentials", "curated", "detailed", "all"] as FaceTier[]).map((t) => (
                   <SelectItem key={t} value={t}>
                     {faceTierLabel(t)}
                   </SelectItem>
