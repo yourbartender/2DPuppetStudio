@@ -19,10 +19,16 @@ export const VISEME_LABELS: Record<SpeechViseme, string> = {
 
 export interface TrackedHand {
   label: "L" | "R";
-  landmarks: Landmark[]; // 21 smoothed normalized landmarks (top-left origin, mirrored if mirror=true)
-  wristAngle: number; // radians, angle from wrist(0) to middle MCP(9)
-  palmFacingSign: number; // +1 = palm facing camera, -1 = back of hand facing camera
-  scale: number; // normalized hand size (wrist to middle MCP distance)
+  /** 21 smoothed normalized landmarks in SCREEN space (0..1 top-left origin, mirror ALREADY applied) */
+  landmarks: Landmark[];
+  /** Radians matching HolisticTracker.swift: 0 = pointing UP (-Y), +pi/2 = right (+X), +-pi = down (+Y) */
+  wristAngle: number;
+  /** +1 = palm facing camera, -1 = back of hand facing camera */
+  palmFacingSign: number;
+  /** Depth scale normalized around 1.0 (0.88..1.18) */
+  scale: number;
+  /** 5 finger curl values 0..1 [thumb, index, middle, ring, pinky] */
+  fingerCurls: number[];
   gesture: string;
   gestureScore: number;
   pinch: number;
@@ -33,6 +39,7 @@ export interface TrackedHand {
 
 export interface TrackedFaceMetrics {
   present: boolean;
+  /** Screen-space (mirror ALREADY applied) 0..1 face center */
   rawAnchorX: number;
   rawAnchorY: number;
   rawIOD: number;
@@ -53,6 +60,7 @@ export interface TrackedFaceMetrics {
   mouthSmile: number;
   mouthPucker: number;
   browRaise: number;
+  browFurrow: number;
   eyeBlinkL: number;
   eyeBlinkR: number;
   viseme: SpeechViseme;
@@ -67,7 +75,10 @@ export interface CalibrationBaseline {
   rollOffset: number;
   yawOffset: number;
   pitchOffset: number;
+  /** Isotropic shoulder span in height units */
   shoulderSpan: number;
+  calibratedUpperArmLen?: number;
+  calibratedForearmLen?: number;
   armSpan: number;
   hipCenterX: number;
   hipCenterY: number;
@@ -82,7 +93,7 @@ export interface TrackedFrame {
   frameAspect: number;
   isMirrored: boolean;
   hands: TrackedHand[];
-  /** 33 MediaPipe Pose landmarks in screen-normalized coords (0..1, top-left origin, mirror applied) */
+  /** 33 MediaPipe Pose landmarks in SCREEN-normalized coords (0..1, top-left origin, mirror ALREADY applied) */
   poseLandmarks: Landmark[] | null;
   poseJointFresh: boolean[];
   posePresent: boolean;
@@ -95,8 +106,8 @@ export function createEmptyFaceMetrics(): TrackedFaceMetrics {
   return {
     present: false,
     rawAnchorX: 0.5,
-    rawAnchorY: 0.42,
-    rawIOD: 0.12,
+    rawAnchorY: 0.48,
+    rawIOD: 0.085,
     rawVerticalSkull: 0.16,
     headX: 0,
     headY: 0,
@@ -108,6 +119,7 @@ export function createEmptyFaceMetrics(): TrackedFaceMetrics {
     mouthSmile: 0,
     mouthPucker: 0,
     browRaise: 0,
+    browFurrow: 0,
     eyeBlinkL: 0,
     eyeBlinkR: 0,
     viseme: "neutral",
@@ -134,13 +146,13 @@ export function createDefaultCalibration(): CalibrationBaseline {
     calibrated: false,
     anchorX: 0.5,
     anchorY: 0.42,
-    iod: 0.12,
+    iod: 0.085,
     verticalSkull: 0.16,
     rollOffset: 0,
     yawOffset: 0,
     pitchOffset: 0,
-    shoulderSpan: 0.24,
-    armSpan: 0.34,
+    shoulderSpan: 0.36,
+    armSpan: 0.52,
     hipCenterX: 0.5,
     hipCenterY: 0.78,
     leftShoulderX: 0.38,

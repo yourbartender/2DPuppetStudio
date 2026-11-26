@@ -558,8 +558,13 @@ export function HandOscApp() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-gradient-surface text-foreground">
-      {/* Hidden persistent video element & media file pickers (never unmount on tab switch!) */}
-      <video ref={videoRef} playsInline muted className="hidden" />
+      {/* Offscreen in-viewport video sink (never display:none, which throttles Chromium video decoding!) */}
+      <video
+        ref={videoRef}
+        playsInline
+        muted
+        className="pointer-events-none fixed left-0 top-0 -z-50 h-px w-px opacity-[0.01]"
+      />
       <input
         ref={videoFileInputRef}
         type="file"
@@ -965,10 +970,12 @@ function ModePill({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition ${
-        active
-          ? "bg-cyan-500 text-black font-semibold shadow-sm"
-          : "text-muted-foreground hover:bg-white/10 hover:text-foreground"
+      style={{
+        backgroundColor: active ? "#06b6d4" : "transparent",
+        color: active ? "#04070d" : "#9aa4b8",
+      }}
+      className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 transition ${
+        active ? "font-semibold shadow-sm" : "font-medium hover:bg-white/10 hover:text-white"
       }`}
     >
       {icon}

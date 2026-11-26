@@ -238,6 +238,7 @@ export function PuppetStudioInspector({
                     key={m.slot}
                     onClick={() => {
                       setSelectedSlot(m.slot);
+                      store.setShowStageTransformBox(true);
                       setCopyMenuOpen(false);
                     }}
                     className={`flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 transition ${
@@ -526,15 +527,24 @@ export function PuppetStudioInspector({
                       <FlipVertical2 className="h-3 w-3" />
                       Flip V
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => store.resetPartTransform(selectedSlot)}
+                      className="inline-flex items-center gap-0.5 rounded bg-white/8 px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-cyan-300"
+                      title="Reset part scale, rotation, flip & offset"
+                    >
+                      <RotateCcw className="h-2.5 w-2.5" />
+                      Reset
+                    </button>
                   </div>
                 </div>
 
                 <CompactSlider
                   label="Width"
                   value={rig.partWidthScale[selectedSlot] ?? 1}
-                  min={0.3}
-                  max={2.4}
-                  step={0.05}
+                  min={0.25}
+                  max={3.5}
+                  step={0.02}
                   format={(v) => `${Math.round(v * 100)}%`}
                   onChange={(v) =>
                     store.updateRig((p) => ({
@@ -546,9 +556,9 @@ export function PuppetStudioInspector({
                 <CompactSlider
                   label="Height"
                   value={rig.partHeightScale[selectedSlot] ?? 1}
-                  min={0.3}
-                  max={2.4}
-                  step={0.05}
+                  min={0.25}
+                  max={3.5}
+                  step={0.02}
                   format={(v) => `${Math.round(v * 100)}%`}
                   onChange={(v) =>
                     store.updateRig((p) => ({

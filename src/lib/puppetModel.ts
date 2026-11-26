@@ -927,11 +927,13 @@ export function deserializePersistedState(
     for (const slot of ALL_PUPPET_SLOTS) {
       const incoming = raw.pinsBySlot[slot];
       if (Array.isArray(incoming) && incoming.length > 0) {
-        // Merge incoming coordinates onto default pins so any newly added pins still exist
-        const merged = pins[slot].map((defPin) => {
-          const match = incoming.find((p) => p.id === defPin.id);
-          return match ? { ...defPin, x: match.x, y: match.y } : defPin;
-        });
+        // Preserve ALL incoming pins (including extra PSD pins like torso leftHip/rightHip!)
+        // and append any default pins not present in incoming.
+        const seen = new Set(incoming.map((p) => p.id));
+        const merged = [
+          ...incoming.map((p) => ({ ...p })),
+          ...pins[slot].filter((defPin) => !seen.has(defPin.id)),
+        ];
         pins[slot] = merged;
       }
     }
@@ -1016,7 +1018,7 @@ export function deserializePersistedState(
 
 const IDB_NAME = "PuppetStudioDB";
 const IDB_STORE = "rigs";
-const IDB_KEY = "activeRig";
+const IDB_KEY = "activeRig_v2";
 
 function openRigDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -1074,6 +1076,8 @@ export interface PuppetStore {
   setSelectedSlot: (slot: PuppetPartSlot) => void;
   selectedPinId: string | null;
   setSelectedPinId: (id: string | null) => void;
+  showStageTransformBox: boolean;
+  setShowStageTransformBox: (show: boolean) => void;
   canUndo: boolean;
   canRedo: boolean;
   statusMessage: string;
@@ -1086,8 +1090,11 @@ export interface PuppetStore {
   updatePin: (slot: PuppetPartSlot, pinId: string, x: number, y: number, recordUndo?: boolean) => void;
   resetSinglePin: (slot: PuppetPartSlot, pinId: string) => void;
   resetAllPins: () => void;
+  resetPartTransform: (slot: PuppetPartSlot) => void;
   moveLayerForward: (slot: PuppetPartSlot) => void;
   moveLayerBackward: (slot: PuppetPartSlot) => void;
+  moveLayerToFront: (slot: PuppetPartSlot) => void;
+  moveLayerToBack: (slot: PuppetPartSlot) => void;
   resetToDemoHuman: () => void;
   resetToBlankPuppet: (name?: string) => void;
   exportCharacterPackage: (includeImages?: boolean) => void;
@@ -1102,6 +1109,7 @@ export function usePuppetStore(): PuppetStore {
     useState<PuppetPartCategory>("headAndExpressions");
   const [selectedSlot, setSelectedSlot] = useState<PuppetPartSlot>("head");
   const [selectedPinId, setSelectedPinId] = useState<string | null>(null);
+  const [showStageTransformBox, setShowStageTransformBox] = useState<boolean>(true);
   const [statusMessage, setStatusMessage] = useState<string>("Ready");
 
   const undoStackRef = useRef<PuppetRigState[]>([]);
@@ -1231,11 +1239,44 @@ export function usePuppetStore(): PuppetStore {
         const srcUrl = prev.partDataUrls[fromSlot];
         if (!srcUrl) return prev;
         const srcName = prev.partFileNames[fromSlot] || SLOT_META_BY_ID[fromSlot].title;
+        const srcPins = prev.pinsBySlot[fromSlot];
+        const dstPins = prev.pinsBySlot[toSlot];
+        const samePinIds =
+          srcPins &&
+          dstPins &&
+          srcPins.length === dstPins.length &&
+          srcPins.every((p, idx) => p.id === dstPins[idx].id);
         return {
           ...prev,
           partDataUrls: { ...prev.partDataUrls, [toSlot]: srcUrl },
           partFileNames: { ...prev.partFileNames, [toSlot]: `${srcName} (Copy)` },
           partEnabled: { ...prev.partEnabled, [toSlot]: true },
+          partWidthScale: {
+            ...prev.partWidthScale,
+            [toSlot]: prev.partWidthScale[fromSlot] ?? 1,
+          },
+          partHeightScale: {
+            ...prev.partHeightScale,
+            [toSlot]: prev.partHeightScale[fromSlot] ?? 1,
+          },
+          partRotationOffset: {
+            ...prev.partRotationOffset,
+            [toSlot]: prev.partRotationOffset[fromSlot] ?? 0,
+          },
+          partFlipH: {
+            ...prev.partFlipH,
+            [toSlot]: Boolean(prev.partFlipH[fromSlot]),
+          },
+          partFlipV: {
+            ...prev.partFlipV,
+            [toSlot]: Boolean(prev.partFlipV[fromSlot]),
+          },
+          pinsBySlot: samePinIds
+            ? {
+                ...prev.pinsBySlot,
+                [toSlot]: srcPins.map((p) => ({ ...p })),
+              }
+            : prev.pinsBySlot,
         };
       }, true);
       setStatusMessage(
@@ -1306,6 +1347,39 @@ export function usePuppetStore(): PuppetStore {
     setStatusMessage("Reset all pins to defaults");
   }, [updateRig]);
 
+  const resetPartTransform = useCallback(
+    (slot: PuppetPartSlot) => {
+      updateRig((prev) => {
+        const nextW = { ...prev.partWidthScale };
+        const nextH = { ...prev.partHeightScale };
+        const nextR = { ...prev.partRotationOffset };
+        const nextFH = { ...prev.partFlipH };
+        const nextFV = { ...prev.partFlipV };
+        const nextOX = { ...prev.partOffsetX };
+        const nextOY = { ...prev.partOffsetY };
+        delete nextW[slot];
+        delete nextH[slot];
+        delete nextR[slot];
+        delete nextFH[slot];
+        delete nextFV[slot];
+        delete nextOX[slot];
+        delete nextOY[slot];
+        return {
+          ...prev,
+          partWidthScale: nextW,
+          partHeightScale: nextH,
+          partRotationOffset: nextR,
+          partFlipH: nextFH,
+          partFlipV: nextFV,
+          partOffsetX: nextOX,
+          partOffsetY: nextOY,
+        };
+      }, true);
+      setStatusMessage(`Reset ${SLOT_META_BY_ID[slot].title} transform`);
+    },
+    [updateRig],
+  );
+
   const moveLayerForward = useCallback(
     (slot: PuppetPartSlot) => {
       updateRig((prev) => {
@@ -1326,6 +1400,32 @@ export function usePuppetStore(): PuppetStore {
         if (idx < 0 || idx >= prev.layerStack.length - 1) return prev;
         const next = [...prev.layerStack];
         [next[idx + 1], next[idx]] = [next[idx], next[idx + 1]];
+        return { ...prev, layerStack: next };
+      }, true);
+    },
+    [updateRig],
+  );
+
+  const moveLayerToFront = useCallback(
+    (slot: PuppetPartSlot) => {
+      updateRig((prev) => {
+        const idx = prev.layerStack.indexOf(slot);
+        if (idx <= 0) return prev;
+        const next = prev.layerStack.filter((s) => s !== slot);
+        next.unshift(slot);
+        return { ...prev, layerStack: next };
+      }, true);
+    },
+    [updateRig],
+  );
+
+  const moveLayerToBack = useCallback(
+    (slot: PuppetPartSlot) => {
+      updateRig((prev) => {
+        const idx = prev.layerStack.indexOf(slot);
+        if (idx < 0 || idx >= prev.layerStack.length - 1) return prev;
+        const next = prev.layerStack.filter((s) => s !== slot);
+        next.push(slot);
         return { ...prev, layerStack: next };
       }, true);
     },
@@ -1396,6 +1496,8 @@ export function usePuppetStore(): PuppetStore {
     setSelectedSlot,
     selectedPinId,
     setSelectedPinId,
+    showStageTransformBox,
+    setShowStageTransformBox,
     canUndo: undoStackRef.current.length > 0,
     canRedo: redoStackRef.current.length > 0,
     statusMessage,
@@ -1408,8 +1510,11 @@ export function usePuppetStore(): PuppetStore {
     updatePin,
     resetSinglePin,
     resetAllPins,
+    resetPartTransform,
     moveLayerForward,
     moveLayerBackward,
+    moveLayerToFront,
+    moveLayerToBack,
     resetToDemoHuman,
     resetToBlankPuppet,
     exportCharacterPackage,

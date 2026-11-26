@@ -234,13 +234,16 @@ export function useHolisticTracker(
     }
 
     if (pose && pose.length >= 25) {
-      // Screen-X sorted shoulders so left/right match screen space regardless of mirror
+      const aspect = frameRef.current.frameAspect || 16 / 9;
       const p11 = pose[11];
       const p12 = pose[12];
       const leftSh = p11.x <= p12.x ? p11 : p12;
       const rightSh = p11.x <= p12.x ? p12 : p11;
-      const shSpan = Math.max(0.08, dist2D(leftSh.x, leftSh.y, rightSh.x, rightSh.y));
-      next.shoulderSpan = shSpan;
+      const shSpanIso = Math.max(
+        0.12,
+        Math.hypot((rightSh.x - leftSh.x) * aspect, rightSh.y - leftSh.y),
+      );
+      next.shoulderSpan = shSpanIso;
       next.leftShoulderX = leftSh.x;
       next.leftShoulderY = leftSh.y;
       next.rightShoulderX = rightSh.x;
@@ -253,14 +256,23 @@ export function useHolisticTracker(
         next.hipCenterY = (p23.y + p24.y) * 0.5;
       }
 
-      // Measure calibrated arm span (shoulder->wrist max)
+      // Measure calibrated isotropic upper arm & forearm lengths
+      const isoDist = (a: Landmark, b: Landmark) =>
+        Math.hypot((b.x - a.x) * aspect, b.y - a.y);
+      const p13 = pose[13];
+      const p14 = pose[14];
       const p15 = pose[15];
       const p16 = pose[16];
-      const d1 = p15 ? dist2D(p11.x, p11.y, p15.x, p15.y) : 0;
-      const d2 = p16 ? dist2D(p12.x, p12.y, p16.x, p16.y) : 0;
-      const bestArm = Math.max(d1, d2);
-      if (bestArm > 0.08) {
-        next.armSpan = bestArm;
+      const u1 = p13 && (p13.visibility ?? 1) >= 0.55 ? isoDist(p11, p13) : 0;
+      const u2 = p14 && (p14.visibility ?? 1) >= 0.55 ? isoDist(p12, p14) : 0;
+      const f1 = p13 && p15 && (p15.visibility ?? 1) >= 0.55 ? isoDist(p13, p15) : 0;
+      const f2 = p14 && p16 && (p16.visibility ?? 1) >= 0.55 ? isoDist(p14, p16) : 0;
+      const bestU = Math.max(u1, u2);
+      const bestF = Math.max(f1, f2);
+      if (bestU > 0.08 && bestF > 0.08) {
+        next.calibratedUpperArmLen = bestU;
+        next.calibratedForearmLen = bestF;
+        next.armSpan = bestU + bestF;
       }
     }
 
@@ -444,8 +456,26 @@ export function useHolisticTracker(
       return;
     }
 
+    let lastSend = 0;
+    let lastVideoTime = -1;
+    let lastImageRun = 0;
+    let frameCount = 0;
+    let msgCount = 0;
+    let lastStats = performance.now();
+    let oscInFlight = false;
+
     const loading = { hands: false, pose: false, face: false };
     const failed = { hands: false, pose: false, face: false };
+
+    const createWithCpuFallback = async <T,>(
+      build: (delegate: "GPU" | "CPU") => Promise<T>,
+    ): Promise<T> => {
+      try {
+        return await build("GPU");
+      } catch {
+        return await build("CPU");
+      }
+    };
 
     const ensureModels = (s: TrackerSettings) => {
       if (
@@ -455,13 +485,21 @@ export function useHolisticTracker(
         !failed.hands
       ) {
         loading.hands = true;
-        GestureRecognizer.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: GESTURE_MODEL, delegate: "GPU" },
-          runningMode: "VIDEO",
-          numHands: 2,
-        })
+        createWithCpuFallback((delegate) =>
+          GestureRecognizer.createFromOptions(fileset, {
+            baseOptions: { modelAssetPath: GESTURE_MODEL, delegate },
+            runningMode: "VIDEO",
+            numHands: 2,
+          }),
+        )
           .then((lm) => {
-            if (!cancelled) handLm.current = lm;
+            if (!cancelled) {
+              handLm.current = lm;
+              lastVideoTime = -1;
+              lastImageRun = 0;
+              lastStats = performance.now();
+              frameCount = 0;
+            }
           })
           .catch((e) => {
             failed.hands = true;
@@ -476,13 +514,21 @@ export function useHolisticTracker(
 
       if (s.trackPose && !poseLm.current && !loading.pose && !failed.pose) {
         loading.pose = true;
-        PoseLandmarker.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: POSE_MODEL, delegate: "GPU" },
-          runningMode: "VIDEO",
-          numPoses: 1,
-        })
+        createWithCpuFallback((delegate) =>
+          PoseLandmarker.createFromOptions(fileset, {
+            baseOptions: { modelAssetPath: POSE_MODEL, delegate },
+            runningMode: "VIDEO",
+            numPoses: 1,
+          }),
+        )
           .then((lm) => {
-            if (!cancelled) poseLm.current = lm;
+            if (!cancelled) {
+              poseLm.current = lm;
+              lastVideoTime = -1;
+              lastImageRun = 0;
+              lastStats = performance.now();
+              frameCount = 0;
+            }
           })
           .catch((e) => {
             failed.pose = true;
@@ -497,14 +543,22 @@ export function useHolisticTracker(
 
       if (s.trackFace && !faceLm.current && !loading.face && !failed.face) {
         loading.face = true;
-        FaceLandmarker.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: FACE_MODEL, delegate: "GPU" },
-          runningMode: "VIDEO",
-          numFaces: 1,
-          outputFaceBlendshapes: true,
-        })
+        createWithCpuFallback((delegate) =>
+          FaceLandmarker.createFromOptions(fileset, {
+            baseOptions: { modelAssetPath: FACE_MODEL, delegate },
+            runningMode: "VIDEO",
+            numFaces: 1,
+            outputFaceBlendshapes: true,
+          }),
+        )
           .then((lm) => {
-            if (!cancelled) faceLm.current = lm;
+            if (!cancelled) {
+              faceLm.current = lm;
+              lastVideoTime = -1;
+              lastImageRun = 0;
+              lastStats = performance.now();
+              frameCount = 0;
+            }
           })
           .catch((e) => {
             failed.face = true;
@@ -519,14 +573,6 @@ export function useHolisticTracker(
     };
 
     ensureModels(settingsRef.current);
-
-    let lastSend = 0;
-    let lastVideoTime = -1;
-    let lastImageRun = 0;
-    let frameCount = 0;
-    let msgCount = 0;
-    let lastStats = performance.now();
-    let oscInFlight = false;
 
     const loop = () => {
       if (cancelled) return;
@@ -564,15 +610,19 @@ export function useHolisticTracker(
         const curVideo = videoRef.current;
         if (curVideo && curVideo.readyState >= 2 && curVideo.videoWidth > 0) {
           const timeChanged = curVideo.currentTime !== lastVideoTime;
-          // For paused video files, still re-evaluate at ~10fps so pose stays live without blocking
-          if (timeChanged || (srcMode === "video" && curVideo.paused && now - lastImageRun > 120)) {
+          const cameraTick = srcMode === "camera" && now - lastImageRun >= 20;
+          const pausedVideoTick =
+            srcMode === "video" && curVideo.paused && now - lastImageRun > 120;
+          if (timeChanged || cameraTick || pausedVideoTick) {
             sourceEl = curVideo;
             srcW = curVideo.videoWidth;
             srcH = curVideo.videoHeight;
             smoothDtMs =
-              lastVideoTime >= 0 && curVideo.currentTime > lastVideoTime
+              srcMode === "video" &&
+              lastVideoTime >= 0 &&
+              curVideo.currentTime > lastVideoTime
                 ? (curVideo.currentTime - lastVideoTime) * 1000
-                : 16.67;
+                : Math.max(16.67, now - lastImageRun);
             lastVideoTime = curVideo.currentTime;
             lastImageRun = now;
             shouldProcess = true;
@@ -699,12 +749,22 @@ export function useHolisticTracker(
         // Screen-space pose anchors: screen-left shoulder/wrist -> "L", screen-right -> "R"
         let poseLeftWrist: Landmark | null = null;
         let poseRightWrist: Landmark | null = null;
+        let poseLeftShoulder: Landmark | null = null;
+        let poseRightShoulder: Landmark | null = null;
+        let poseShoulderSpanIso = 0;
+        const aspect = srcW / Math.max(1, srcH);
         let bodyMidX = calibrationRef.current.anchorX || 0.5;
         if (finalPose && finalPose.length >= 17) {
           const p11 = finalPose[11];
           const p12 = finalPose[12];
-          if ((p11.visibility ?? 1) >= 0.4 && (p12.visibility ?? 1) >= 0.4) {
+          if ((p11.visibility ?? 1) >= 0.45 && (p12.visibility ?? 1) >= 0.45) {
             bodyMidX = (p11.x + p12.x) * 0.5;
+            poseLeftShoulder = p11.x <= p12.x ? p11 : p12;
+            poseRightShoulder = p11.x <= p12.x ? p12 : p11;
+            poseShoulderSpanIso = Math.hypot(
+              (poseRightShoulder.x - poseLeftShoulder.x) * aspect,
+              poseRightShoulder.y - poseLeftShoulder.y,
+            );
           }
           const leftWristIdx = p11.x <= p12.x ? 15 : 16;
           const rightWristIdx = leftWristIdx === 15 ? 16 : 15;
@@ -718,28 +778,55 @@ export function useHolisticTracker(
           }
         }
 
+        // Candidate Hand Gating (matches HolisticTracker.swift & AGENTS.md):
+        // Reject tiny background noise blobs & impossible floating hands far from shoulders!
+        const gatedIndices: number[] = [];
+        for (let hi = 0; hi < handsRaw.length; hi++) {
+          const hLm = handsRaw[hi] as Landmark[];
+          if (!hLm || hLm.length < 21) continue;
+          const wx = isMirror ? 1 - hLm[0].x : hLm[0].x;
+          const wy = hLm[0].y;
+          if (wx < 0.004 || wx > 0.996 || wy < 0.004 || wy > 0.996) continue;
+          const mx = isMirror ? 1 - hLm[9].x : hLm[9].x;
+          const my = hLm[9].y;
+          const palmIso = Math.hypot((mx - wx) * aspect, my - wy);
+          if (palmIso < 0.028) continue;
+
+          if (poseLeftShoulder && poseRightShoulder) {
+            const dLS = Math.hypot(
+              (wx - poseLeftShoulder.x) * aspect,
+              wy - poseLeftShoulder.y,
+            );
+            const dRS = Math.hypot(
+              (wx - poseRightShoulder.x) * aspect,
+              wy - poseRightShoulder.y,
+            );
+            const maxReachIso = Math.max(0.76, poseShoulderSpanIso * 2.65);
+            if (Math.min(dLS, dRS) > maxReachIso) continue;
+          }
+          gatedIndices.push(hi);
+        }
+
         // Pure geometric screen-space L/R hand assignment (never relies on flipped MediaPipe
         // GestureRecognizer categoryName, so left screen side ALWAYS drives left puppet arm
         // and right screen side ALWAYS drives right puppet arm — impossible to cross!)
-        const assignedLabels: ("L" | "R")[] = new Array(handsRaw.length).fill("L");
+        const assignedLabels: ("L" | "R")[] = new Array(gatedIndices.length).fill("L");
 
-        if (handsRaw.length === 1) {
-          const lm = handsRaw[0] as Landmark[];
+        if (gatedIndices.length === 1) {
+          const lm = handsRaw[gatedIndices[0]] as Landmark[];
           const wx = isMirror ? 1 - lm[0].x : lm[0].x;
           const wy = lm[0].y;
           const dL = poseLeftWrist ? dist2D(wx, wy, poseLeftWrist.x, poseLeftWrist.y) : Infinity;
           const dR = poseRightWrist ? dist2D(wx, wy, poseRightWrist.x, poseRightWrist.y) : Infinity;
 
           if (Math.min(dL, dR) < 0.24 && Math.abs(dL - dR) > 0.04) {
-            // Directly anchored to a visible skeleton wrist
             assignedLabels[0] = dL <= dR ? "L" : "R";
           } else {
-            // Fallback: screen side relative to body/face center
             assignedLabels[0] = wx <= bodyMidX ? "L" : "R";
           }
-        } else if (handsRaw.length >= 2) {
-          const w0 = handsRaw[0][0];
-          const w1 = handsRaw[1][0];
+        } else if (gatedIndices.length >= 2) {
+          const w0 = handsRaw[gatedIndices[0]][0];
+          const w1 = handsRaw[gatedIndices[1]][0];
           const w0x = isMirror ? 1 - w0.x : w0.x;
           const w1x = isMirror ? 1 - w1.x : w1.x;
 
@@ -764,7 +851,6 @@ export function useHolisticTracker(
           }
 
           if (!matchedByPose) {
-            // Screen-left hand is ALWAYS "L", screen-right hand is ALWAYS "R"
             if (w0x <= w1x) {
               assignedLabels[0] = "L";
               assignedLabels[1] = "R";
@@ -775,9 +861,10 @@ export function useHolisticTracker(
           }
         }
 
-        for (let i = 0; i < handsRaw.length; i++) {
+        for (let gi = 0; gi < gatedIndices.length; gi++) {
+          const i = gatedIndices[gi];
           const lm = handsRaw[i] as Landmark[];
-          let finalLabel: "L" | "R" = assignedLabels[i] ?? "L";
+          let finalLabel: "L" | "R" = assignedLabels[gi] ?? "L";
           if (present[finalLabel]) {
             finalLabel = finalLabel === "L" ? "R" : "L";
           }
@@ -806,9 +893,31 @@ export function useHolisticTracker(
           const midMcp = screenLm[9];
           const idxMcp = screenLm[5];
           const pkyMcp = screenLm[17];
-          const aspect = srcW / Math.max(1, srcH);
-          const wristAngle = Math.atan2(midMcp.y - wrist.y, (midMcp.x - wrist.x) * aspect);
-          const handScaleVal = Math.hypot((midMcp.x - wrist.x) * aspect, midMcp.y - wrist.y);
+          // Match HolisticTracker.swift line 1040: 0 rad = fingers pointing straight UP (-Y)
+          const wristAngle = Math.atan2(
+            (midMcp.x - wrist.x) * aspect,
+            -(midMcp.y - wrist.y),
+          );
+          const palmLenIso = Math.max(
+            0.02,
+            Math.hypot((midMcp.x - wrist.x) * aspect, midMcp.y - wrist.y),
+          );
+          const handDepthScale = clamp(palmLenIso / 0.115, 0.88, 1.18);
+
+          // Compute 5 finger curls 0..1 (0 = extended, 1 = curled into palm)
+          const fingerTips = [4, 8, 12, 16, 20];
+          const fingerMcps = [2, 5, 9, 13, 17];
+          const fingerCurls = fingerTips.map((tipIdx, fIdx) => {
+            const tip = screenLm[tipIdx];
+            const mcp = screenLm[fingerMcps[fIdx]];
+            const tipDist = Math.hypot((tip.x - wrist.x) * aspect, tip.y - wrist.y);
+            const mcpDist = Math.max(
+              0.015,
+              Math.hypot((mcp.x - wrist.x) * aspect, mcp.y - wrist.y),
+            );
+            const ratio = tipDist / mcpDist;
+            return clamp((1.85 - ratio) / 0.95, 0, 1);
+          });
 
           // 2D cross product of (wrist->indexMCP) x (wrist->pinkyMCP) in screen Y-down coords:
           // Screen-left hand ("L") with palm facing camera has index toward center (+x) & pinky outer (-x) => cross < 0
@@ -826,7 +935,8 @@ export function useHolisticTracker(
             landmarks: screenLm,
             wristAngle,
             palmFacingSign,
-            scale: handScaleVal,
+            scale: handDepthScale,
+            fingerCurls,
             gesture: g,
             gestureScore: gScore,
             pinch,
@@ -973,6 +1083,7 @@ export function useHolisticTracker(
                 mouthSmile: lerp(prev.mouthSmile, 0, t),
                 mouthPucker: lerp(prev.mouthPucker, 0, t),
                 browRaise: lerp(prev.browRaise, 0, t),
+                browFurrow: lerp(prev.browFurrow, 0, t),
                 eyeBlinkL: lerp(prev.eyeBlinkL, 0, t),
                 eyeBlinkR: lerp(prev.eyeBlinkR, 0, t),
                 viseme: t > 0.45 ? "neutral" : prev.viseme,
@@ -989,6 +1100,19 @@ export function useHolisticTracker(
           messages.push({ address: "/face/present", args: [facesRaw.length > 0 ? 1 : 0] });
         }
 
+        // Per-joint freshness & visibility gate for pose
+        const poseJointFresh = finalPose
+          ? finalPose.map(
+              (p) =>
+                Boolean(screenPose) &&
+                (p.visibility ?? 1) >= 0.58 &&
+                p.x >= 0.01 &&
+                p.x <= 0.99 &&
+                p.y >= 0.01 &&
+                p.y <= 0.96,
+            )
+          : new Array(33).fill(false);
+
         // Publish live 60 FPS frame ref for PuppetStageCanvas
         frameRef.current = {
           timestamp: now,
@@ -996,7 +1120,7 @@ export function useHolisticTracker(
           isMirrored: isMirror,
           hands: finalHands,
           poseLandmarks: finalPose,
-          poseJointFresh: new Array(33).fill(Boolean(screenPose)),
+          poseJointFresh,
           posePresent: Boolean(finalPose),
           poseReturnBlend,
           face: faceMetrics,
@@ -1024,7 +1148,7 @@ export function useHolisticTracker(
           setStats((p) => ({
             fps: Math.round(frameCount / elapsed),
             msgsPerSec: Math.round(msgCount / elapsed),
-            hands: handsRaw.length,
+            hands: gatedIndices.length,
             poses: posesRaw.length,
             faces: facesRaw.length,
             gestures,
@@ -1201,6 +1325,10 @@ function computeFaceMetrics(
   const browOuterR = bs.browOuterUpRight ?? 0;
   const browRaise = clamp((browInner * 0.5 + (browOuterL + browOuterR) * 0.35) * 1.35, 0, 1);
 
+  const browDownL = bs.browDownLeft ?? 0;
+  const browDownR = bs.browDownRight ?? 0;
+  const browFurrow = clamp(((browDownL + browDownR) * 0.5) * 1.2, 0, 1);
+
   // Independent Wink / Blink mapping (mirror-aware!)
   // MediaPipe ARKit eyeBlinkLeft is the subject's anatomical LEFT eye.
   // In Mirror mode (isMirror=true), your left eye appears on the LEFT side of the screen
@@ -1251,6 +1379,7 @@ function computeFaceMetrics(
     mouthSmile,
     mouthPucker,
     browRaise,
+    browFurrow,
     eyeBlinkL: clamp(eyeBlinkL, 0, 1),
     eyeBlinkR: clamp(eyeBlinkR, 0, 1),
     viseme,
