@@ -638,7 +638,6 @@ export function useHolisticTracker(
         }
 
         const handsRaw = handRes?.landmarks ?? [];
-        const handed = handRes?.handednesses ?? [];
         const gestureResults = handRes?.gestures ?? [];
         const posesRaw = poseRes?.landmarks ?? [];
         const facesRaw = faceRes?.faceLandmarks ?? [];
@@ -697,14 +696,16 @@ export function useHolisticTracker(
         const present = { L: false, R: false };
         const freshHands: TrackedHand[] = [];
 
-        // Screen-space pose wrists: screen-left shoulder -> "L", screen-right shoulder -> "R"
-        // (In mirror mode, user's anatomical left [11/15] is screen-left and right [12/16] is screen-right;
-        //  in non-mirrored video mode, anatomical right [12/16] is screen-left and left [11/15] is screen-right.)
+        // Screen-space pose anchors: screen-left shoulder/wrist -> "L", screen-right -> "R"
         let poseLeftWrist: Landmark | null = null;
         let poseRightWrist: Landmark | null = null;
+        let bodyMidX = calibrationRef.current.anchorX || 0.5;
         if (finalPose && finalPose.length >= 17) {
           const p11 = finalPose[11];
           const p12 = finalPose[12];
+          if ((p11.visibility ?? 1) >= 0.4 && (p12.visibility ?? 1) >= 0.4) {
+            bodyMidX = (p11.x + p12.x) * 0.5;
+          }
           const leftWristIdx = p11.x <= p12.x ? 15 : 16;
           const rightWristIdx = leftWristIdx === 15 ? 16 : 15;
           const lw = finalPose[leftWristIdx];
@@ -717,47 +718,53 @@ export function useHolisticTracker(
           }
         }
 
-        // Precompute screen-space label for each detected hand so 1-hand and 2-hand matching never cross
-        const assignedLabels: ("L" | "R")[] = handsRaw.map((rawLm, i) => {
-          const lm = rawLm as Landmark[];
-          const rawLabel: "L" | "R" =
-            handed[i]?.[0]?.categoryName === "Left" ? "L" : "R";
-          // MediaPipe GestureRecognizer assumes selfie-mirrored input, so on raw unmirrored video
-          // "Right" = user's physical left hand (screen-left when mirrored).
-          return isMirror ? (rawLabel === "L" ? "R" : "L") : rawLabel;
-        });
+        // Pure geometric screen-space L/R hand assignment (never relies on flipped MediaPipe
+        // GestureRecognizer categoryName, so left screen side ALWAYS drives left puppet arm
+        // and right screen side ALWAYS drives right puppet arm — impossible to cross!)
+        const assignedLabels: ("L" | "R")[] = new Array(handsRaw.length).fill("L");
 
-        if (handsRaw.length === 1 && poseLeftWrist && poseRightWrist) {
+        if (handsRaw.length === 1) {
           const lm = handsRaw[0] as Landmark[];
           const wx = isMirror ? 1 - lm[0].x : lm[0].x;
           const wy = lm[0].y;
-          const dL = dist2D(wx, wy, poseLeftWrist.x, poseLeftWrist.y);
-          const dR = dist2D(wx, wy, poseRightWrist.x, poseRightWrist.y);
-          if (Math.min(dL, dR) < 0.30 && Math.abs(dL - dR) > 0.03) {
+          const dL = poseLeftWrist ? dist2D(wx, wy, poseLeftWrist.x, poseLeftWrist.y) : Infinity;
+          const dR = poseRightWrist ? dist2D(wx, wy, poseRightWrist.x, poseRightWrist.y) : Infinity;
+
+          if (Math.min(dL, dR) < 0.24 && Math.abs(dL - dR) > 0.04) {
+            // Directly anchored to a visible skeleton wrist
             assignedLabels[0] = dL <= dR ? "L" : "R";
+          } else {
+            // Fallback: screen side relative to body/face center
+            assignedLabels[0] = wx <= bodyMidX ? "L" : "R";
           }
-        } else if (handsRaw.length === 2) {
+        } else if (handsRaw.length >= 2) {
           const w0 = handsRaw[0][0];
           const w1 = handsRaw[1][0];
           const w0x = isMirror ? 1 - w0.x : w0.x;
           const w1x = isMirror ? 1 - w1.x : w1.x;
+
+          let matchedByPose = false;
           if (poseLeftWrist && poseRightWrist) {
-            // Optimal 2x2 assignment to pose wrists (even works when arms cross!)
             const cost0L1R =
               dist2D(w0x, w0.y, poseLeftWrist.x, poseLeftWrist.y) +
               dist2D(w1x, w1.y, poseRightWrist.x, poseRightWrist.y);
             const cost0R1L =
               dist2D(w0x, w0.y, poseRightWrist.x, poseRightWrist.y) +
               dist2D(w1x, w1.y, poseLeftWrist.x, poseLeftWrist.y);
-            if (cost0L1R <= cost0R1L) {
-              assignedLabels[0] = "L";
-              assignedLabels[1] = "R";
-            } else {
-              assignedLabels[0] = "R";
-              assignedLabels[1] = "L";
+            if (Math.min(cost0L1R, cost0R1L) < 0.48) {
+              if (cost0L1R <= cost0R1L) {
+                assignedLabels[0] = "L";
+                assignedLabels[1] = "R";
+              } else {
+                assignedLabels[0] = "R";
+                assignedLabels[1] = "L";
+              }
+              matchedByPose = true;
             }
-          } else if (assignedLabels[0] === assignedLabels[1]) {
-            // Fallback without pose: screen-left hand is "L", screen-right is "R"
+          }
+
+          if (!matchedByPose) {
+            // Screen-left hand is ALWAYS "L", screen-right hand is ALWAYS "R"
             if (w0x <= w1x) {
               assignedLabels[0] = "L";
               assignedLabels[1] = "R";
